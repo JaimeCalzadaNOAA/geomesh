@@ -39,3 +39,10 @@ class Hfun:
         else:
             raise NotImplementedError(
                 f"Size function type {type(hfun)} is not supported!")
+
+    @staticmethod
+    def is_valid_type(hfun_object):
+        # TODO: Find a cleaner way to check (combine with check in
+        # __new__ and use a dict perhaps?
+        valid_types = (types._HfunRaster, )
+        return isinstance(hfun_object, valid_types)

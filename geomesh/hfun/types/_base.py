@@ -22,6 +22,24 @@ class _BaseHFunType(abc.ABC):
         return self._nprocs
 
     @property
+    def hmin(self):
+        return self._hmin
+
+    @property
+    def hmax(self):
+        return self._hmax
+
+    @property
+    def hmin_is_absolute_limit(self):
+        # TODO: Provide setter
+        return True
+
+    @property
+    def hmax_is_absolute_limit(self):
+        # TODO: Provide setter
+        return True
+
+    @property
     def _nprocs(self):
         return np.abs(self.__nprocs)
 
@@ -32,20 +50,12 @@ class _BaseHFunType(abc.ABC):
         self.__nprocs = nprocs
 
     @property
-    def hmin(self):
-        return self._hmin
-
-    @property
     def _hmin(self):
         return self.__hmin
 
     @_hmin.setter
     def _hmin(self, hmin):
         self.__hmin = hmin
-
-    @property
-    def hmax(self):
-        return self._hmax
 
     @property
     def _hmax(self):
@@ -59,3 +69,21 @@ class _BaseHFunType(abc.ABC):
     @lru_cache(maxsize=None)
     def _logger(self):
         return logging.getLogger(__name__ + '.' + self.__class__.__name__)
+
+    @abc.abstractmethod
+    def add_contour(
+            self,
+            level: float,
+            target_size: float,
+            expansion_rate: float
+    ):
+        raise NotImplementedError
+
+    @abc.abstractmethod
+    def add_feature(self, feature, target_size, expansion_rate):
+        raise NotImplementedError
+
+    @abc.abstractmethod
+    def add_subtidal_flow_limiter(
+            self, hmin=None, upper_bound=None, lower_bound=None):
+        raise NotImplementedError

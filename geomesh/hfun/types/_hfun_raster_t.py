@@ -212,16 +212,17 @@ class _HfunRaster(_BaseHFunType):
         else:  # is not geographic
             # TODO: Change window to None in get_xy, is it correct?!
             xy = self._src.get_xy(None)
-            # TODO: What if it's NOT latlon?
-            _tx, _ty, zone, _ = utm.from_latlon(xy[:, 1], xy[:, 0])
-            dst_crs = CRS(proj='utm', zone=zone, ellps='WGS84')
-            transformer = Transformer.from_crs(
-                self._src.crs, dst_crs, always_xy=True)
+            # TODO: What if it's NOT latlon? Why transform if not
+            # geographic?!
+#            _tx, _ty, zone, _ = utm.from_latlon(xy[:, 1], xy[:, 0])
+#            dst_crs = CRS(proj='utm', zone=zone, ellps='WGS84')
+#            transformer = Transformer.from_crs(
+#                self._src.crs, dst_crs, always_xy=True)
             res = []
             for linestring in feature:
                 distances = [0]
-                linestring = transform(
-                    transformer.transform, linestring)
+#                linestring = transform(
+#                    transformer.transform, linestring)
                 while distances[-1] + target_size < linestring.length:
                     distances.append(distances[-1] + target_size)
                 distances.append(linestring.length)
@@ -398,6 +399,7 @@ class _HfunRaster(_BaseHFunType):
         hmat.value = np.flipud(
                 raster.get_values(band=1)
                 ).astype(jigsaw_msh_t.REALS_t)
+        # TODO: Add any checks for min and max?
 
         return hmat
 
