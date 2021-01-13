@@ -5,11 +5,11 @@ from pyproj import CRS
 
 from jigsawpy import jigsaw_msh_t
 
-from ...raster import Raster
-from ._base import _BaseGeomType
+from geomesh.raster import Raster
+from geomesh.geom.base import BaseGeom
 
 
-class _RasterGeomType(_BaseGeomType):
+class RasterGeom(BaseGeom):
 
 
     def __init__(self, raster, zmin=None, zmax=None, **kwargs):

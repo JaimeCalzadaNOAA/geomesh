@@ -1,11 +1,6 @@
-from functools import lru_cache
-import logging
-import pathlib
-import tempfile
-
-
-from ..raster import Raster
-from . import types
+from geomesh.raster import Raster
+from geomesh.hfun.base import BaseHFun
+from geomesh.hfun.hfun_raster import HfunRaster
 
 
 class Hfun:
@@ -34,15 +29,11 @@ class Hfun:
         """
 
         if isinstance(hfun, Raster):
-            return (types._HfunRaster(hfun, hmin, hmax,
-                                      nprocs, interface))
+            return (HfunRaster(hfun, hmin, hmax, nprocs, interface))
         else:
             raise NotImplementedError(
                 f"Size function type {type(hfun)} is not supported!")
 
     @staticmethod
     def is_valid_type(hfun_object):
-        # TODO: Find a cleaner way to check (combine with check in
-        # __new__ and use a dict perhaps?
-        valid_types = (types._HfunRaster, )
-        return isinstance(hfun_object, valid_types)
+        return isinstance(hfun_object, BaseHFun)

@@ -1,5 +1,6 @@
-from ..raster import Raster
-from . import types
+from geomesh.raster import Raster
+from geomesh.geom.base import BaseGeom
+from geomesh.geom.raster_geom import RasterGeom
 
 class Geom:
     """
@@ -26,14 +27,11 @@ class Geom:
 
         # TODO: Apply CRS and Ellipsoid if not NONE
         if isinstance(geom, Raster):
-            return types._RasterGeomType(geom, zmin, zmax)
+            return RasterGeom(geom, zmin, zmax)
         else:
             raise NotImplementedError(
                 f"Geom type {type(geom)} is not supported!")
 
     @staticmethod
     def is_valid_type(geom_object):
-        # TODO: Find a cleaner way to check (combine with check in
-        # __new__ and use a dict perhaps?
-        valid_types = (types._RasterGeomType, )
-        return isinstance(geom_object, valid_types)
+        return isinstance(geom_object, BaseGeom)

@@ -3,7 +3,7 @@ import logging
 from functools import lru_cache
 
 
-class _BaseGeomType(abc.ABC):
+class BaseGeom(abc.ABC):
 
 
     @abc.abstractmethod

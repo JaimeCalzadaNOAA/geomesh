@@ -16,10 +16,10 @@ from shapely.ops import transform
 from shapely.geometry import LineString, MultiLineString
 import utm
 
-from ...figures import _figure
-from ...raster import Raster
-from ...geom import Geom
-from ._base import _BaseHFunType
+from geomesh.figures import _figure
+from geomesh.raster import Raster
+from geomesh.geom import Geom
+from geomesh.hfun.base import BaseHFun
 
 
 tmpdir = pathlib.Path(tempfile.gettempdir()+'/geomesh') / 'hfun'
@@ -96,7 +96,7 @@ def _jigsaw_hmat_worker(path, window, hmin, hmax, geom):
     return mesh
 
 
-class _HfunRaster(_BaseHFunType):
+class HfunRaster(BaseHFun):
 
     __slots__ = [
         "__raster",
