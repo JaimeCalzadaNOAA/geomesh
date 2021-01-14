@@ -1,5 +1,5 @@
 from geomesh.raster import Raster
-from geomesh.hfun.base import BaseHFun
+from geomesh.hfun.base import BaseHfun
 from geomesh.hfun.hfun_raster import HfunRaster
 
 
@@ -36,4 +36,4 @@ class Hfun:
 
     @staticmethod
     def is_valid_type(hfun_object):
-        return isinstance(hfun_object, BaseHFun)
+        return isinstance(hfun_object, BaseHfun)

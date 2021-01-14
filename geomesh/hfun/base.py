@@ -4,7 +4,7 @@ import numpy as np
 from functools import lru_cache
 
 
-class BaseHFun(abc.ABC):
+class BaseHfun(abc.ABC):
 
     @property
     @abc.abstractmethod

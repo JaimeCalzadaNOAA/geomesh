@@ -19,7 +19,7 @@ import utm
 from geomesh.figures import _figure
 from geomesh.raster import Raster
 from geomesh.geom import Geom
-from geomesh.hfun.base import BaseHFun
+from geomesh.hfun.base import BaseHfun
 
 
 tmpdir = pathlib.Path(tempfile.gettempdir()+'/geomesh') / 'hfun'
@@ -45,6 +45,10 @@ def _contour_worker(path, window, level, tgt_size):
 
 
 def _jigsaw_hmat_worker(path, window, hmin, hmax, geom):
+
+    # TODO: Check for is_geographic on crs before passing to utm package
+    raise NotImplementedError
+
     geom = None
     raster = Raster(path)
 
@@ -96,7 +100,7 @@ def _jigsaw_hmat_worker(path, window, hmin, hmax, geom):
     return mesh
 
 
-class HfunRaster(BaseHFun):
+class HfunRaster(BaseHfun):
 
     __slots__ = [
         "__raster",
@@ -210,19 +214,12 @@ class HfunRaster(BaseHFun):
                     dst.write(values, window=window)
 
         else:  # is not geographic
-            # TODO: Change window to None in get_xy, is it correct?!
-            xy = self._src.get_xy(None)
-            # TODO: What if it's NOT latlon? Why transform if not
-            # geographic?!
-#            _tx, _ty, zone, _ = utm.from_latlon(xy[:, 1], xy[:, 0])
-#            dst_crs = CRS(proj='utm', zone=zone, ellps='WGS84')
-#            transformer = Transformer.from_crs(
-#                self._src.crs, dst_crs, always_xy=True)
+
+            # NOTE: We are not iterating over windows here
+            xy = self._src.get_xy(window=None)
             res = []
             for linestring in feature:
                 distances = [0]
-#                linestring = transform(
-#                    transformer.transform, linestring)
                 while distances[-1] + target_size < linestring.length:
                     distances.append(distances[-1] + target_size)
                 distances.append(linestring.length)
