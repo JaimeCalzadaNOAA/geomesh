@@ -63,6 +63,8 @@ def _jigsaw_hmat_worker(path, window, hmin, hmax, geom):
     hmat.ndims = +2
     hmat.xgrid = _tx.astype(jigsaw_msh_t.REALS_t)
     hmat.ygrid = _ty.astype(jigsaw_msh_t.REALS_t)
+    # TODO: We always get band = 1, so we should make sure the raster's
+    # gaussian_filter will write the filtered band into band 1
     hmat.value = np.flipud(
             raster.get_values(band=1, window=window)
             ).astype(jigsaw_msh_t.REALS_t)
@@ -101,15 +103,6 @@ def _jigsaw_hmat_worker(path, window, hmin, hmax, geom):
 
 
 class HfunRaster(BaseHfun):
-
-    __slots__ = [
-        "__raster",
-        "__nprocs",
-        "__hmin",
-        "__hmax",
-        "__src",
-        "__tmpfile",
-        ]
 
     def __init__(self,
                  raster,
@@ -379,24 +372,26 @@ class HfunRaster(BaseHfun):
         raster = self._src
         x = raster.get_x()
         y = np.flip(raster.get_y())
-
-        # TODO: What if it's not lat/lon?! It can cause issues
-#        _y = np.repeat(np.min(y), len(x))
-#        _x = np.repeat(np.min(x), len(y))
-#        print(np.max(x), np.max(y), np.min(x), np.min(y))
-#        _tx = utm.from_latlon(_y, x)[0]
-#        _ty = np.flip(utm.from_latlon(y, _x)[1])
+        _tx = x
+        _ty = y
+        if self._src.crs.is_geographic:
+            _y = np.repeat(np.min(y), len(x))
+            _x = np.repeat(np.min(x), len(y))
+            _tx = utm.from_latlon(_y, x)[0]
+            _ty = utm.from_latlon(y, _x)[1]
 
         hmat = jigsaw_msh_t()
         hmat.mshID = "euclidean-grid"
         hmat.ndims = +2
-        hmat.xgrid = x.astype(jigsaw_msh_t.REALS_t)
-        hmat.ygrid = y.astype(jigsaw_msh_t.REALS_t)
+        hmat.xgrid = _tx.astype(jigsaw_msh_t.REALS_t)
+        hmat.ygrid = _ty.astype(jigsaw_msh_t.REALS_t)
 
+        # TODO: Values of band=1 are only used. Make sure the
+        # raster's gaussian_filter writes the relevant values into
+        # band 1, or change the hardcoded band id here
         hmat.value = np.flipud(
                 raster.get_values(band=1)
                 ).astype(jigsaw_msh_t.REALS_t)
-        # TODO: Add any checks for min and max?
 
         return hmat
 
