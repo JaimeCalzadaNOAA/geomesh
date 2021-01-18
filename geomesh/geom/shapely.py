@@ -9,7 +9,6 @@ class ShapelyGeom(BaseGeom):
 
 class PolygonGeom(ShapelyGeom):
 
-
     def __init__(self, polygon):
         self._polygon = polygon
 
@@ -31,7 +30,6 @@ class PolygonGeom(ShapelyGeom):
 
 
 class MultiPolygonGeom(ShapelyGeom):
-
 
     def __init__(self, polygon):
         self._polygon = polygon
