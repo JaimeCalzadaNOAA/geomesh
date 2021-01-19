@@ -1,18 +1,20 @@
 from geomesh.raster import Raster
 from geomesh.hfun.base import BaseHfun
-from geomesh.hfun.hfun_raster import HfunRaster
+from geomesh.hfun.raster import HfunRaster
 
 
 class Hfun:
 
-    def __new__(cls,
-                hfun, 
-                hmin=None,
-                hmax=None,
-                ellipsoid=None,
-                verbosity=0,
-                interface='cmdsaw',
-                nprocs=None):
+    def __new__(
+            cls,
+            hfun,
+            hmin=None,
+            hmax=None,
+            ellipsoid=None,
+            verbosity=0,
+            interface='cmdsaw',
+            nprocs=None
+    ):
         """
         Input parameters
         ----------------
