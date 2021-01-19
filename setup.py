@@ -97,7 +97,7 @@ setuptools.setup(
     cmdclass={
         'install_jigsaw': InstallJigsawCommand,
         },
-    python_requires='>=3.6',
+    python_requires=['>=3.6', '<=3.8'],
     setup_requires=['wheel', 'numpy'],
     install_requires=[
                       "jigsawpy",
@@ -114,6 +114,7 @@ setuptools.setup(
                       "shapely",
                       "geoalchemy2",
                       "utm",
+                      "geopandas",
                       ],
     entry_points={
         'console_scripts': [
