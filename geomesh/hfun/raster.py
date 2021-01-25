@@ -1,6 +1,8 @@
-from multiprocessing import Pool, cpu_count
+from multiprocessing import cpu_count
+import pathlib
 import warnings
 
+import geopandas as gpd  # type: ignore[import]
 from jigsawpy import jigsaw_msh_t, jigsaw_jig_t  # type: ignore[import]
 from jigsawpy.libsaw import jigsaw  # type: ignore[import]
 import matplotlib.pyplot as plt  # type: ignore[import]
@@ -19,6 +21,10 @@ from geomesh.hfun.base import BaseHfun
 from geomesh.raster import Raster, get_iter_windows
 from geomesh.geom.shapely import PolygonGeom
 from geomesh import utils
+
+# supress feather warning
+warnings.filterwarnings(
+    'ignore', message='.*initial implementation of Parquet.*')
 
 
 class HfunInputRaster:
@@ -40,7 +46,7 @@ class HfunInputRaster:
             meta.update({'driver': 'GTiff', 'dtype': np.float32})
             with rasterio.open(tmpfile, 'w', **meta,) as dst:
                 for window in windows:
-                    values = src.read(window=window)
+                    values = src.read(window=window).astype(np.float32)
                     values[:] = np.finfo(np.float32).max
                     dst.write(values, window=window)
         obj.__dict__['raster'] = raster
@@ -305,13 +311,14 @@ class HfunRaster(BaseHfun, Raster):
             level: float,
             window: rasterio.windows.Window = None
     ):
-        features = []
+        tmpdir = tempfile.TemporaryDirectory()
         if window is None:
             iter_windows = self.raster.iter_windows()
         else:
             iter_windows = [window]
-
+        feathers = []
         for window in iter_windows:
+            features = []
             x = self.raster.get_x(window)
             y = self.raster.get_y(window)
             values = self.raster.get_values(band=1, window=window)
@@ -326,6 +333,25 @@ class HfunRaster(BaseHfun, Raster):
                     except ValueError:
                         # LineStrings must have at least 2 coordinate tuples
                         pass
+            if len(features) > 0:
+                tmpfile = pathlib.Path(tmpdir.name) / pathlib.Path(
+                        tempfile.NamedTemporaryFile(suffix='.feather').name
+                        ).name
+                gpd.GeoDataFrame(
+                    [{'geometry': ops.linemerge(features)}]
+                    ).to_feather(tmpfile)
+                feathers.append(tmpfile)
+
+        features = []
+        out = gpd.GeoDataFrame()
+        for feather in feathers:
+            out = out.append(gpd.read_feather(feather), ignore_index=True)
+            feather.unlink()
+            for geometry in out.geometry:
+                if isinstance(geometry, LineString):
+                    geometry = MultiLineString([geometry])
+            for linestring in geometry:
+                features.append(linestring)
         return ops.linemerge(features)
 
     @property
@@ -351,32 +377,6 @@ class HfunRaster(BaseHfun, Raster):
     @verbosity.setter
     def verbosity(self, verbosity: int):
         self._verbosity = verbosity
-
-
-# def get_raster_contour_window_aggregate(
-#         path,
-#         chunk_size,
-#         level,
-# ):
-
-    
-
-#     for fname in res:
-#         feather = pathlib.Path(self._tmpdir.name) / fname
-#         rasters_gdf = rasters_gdf.append(
-#             gpd.read_feather(feather),
-#             ignore_index=True)
-#         feather.unlink()
-#     raster = Raster(path, chunk_size=chunk_size)
-#     # with Pool(processes=nprocs) as pool:
-    #     res = pool.starmap(
-    #         get_raster_contours,
-    #         [(raster.tmpfile, level, window) for window
-    #          in raster.iter_windows()]
-    #     )
-    # pool.join()
-    # return [line for sublist in res for line in sublist]
-
 
 
 def resample_features(
