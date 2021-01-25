@@ -264,6 +264,8 @@ class HfunRaster(BaseHfun, Raster):
             upper_bound=None,
             lower_bound=None
     ):
+        raise NotImplementedError(
+            'Needs revision for consistency with updated API.')
         hmin = np.finfo(np.float32).eps if hmin is None else hmin
         if not self._src.crs.is_geographic:
             dx = np.abs(self._src.dx)
