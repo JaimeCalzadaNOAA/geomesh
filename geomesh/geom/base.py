@@ -5,6 +5,8 @@ from jigsawpy import jigsaw_msh_t  # type: ignore[import]
 import numpy as np  # type: ignore[import]
 from shapely.geometry import MultiPolygon  # type: ignore[import]
 
+from geomesh.logger import Logger
+
 
 class BaseGeom(ABC):
     '''Abstract base class used to construct geomesh "geom" objects.
@@ -22,6 +24,8 @@ class BaseGeom(ABC):
     implementation of how to compute this hull based on inputs provided by the
     users.
     '''
+
+    logger = Logger()
 
     @property
     def geom(self) -> jigsaw_msh_t:

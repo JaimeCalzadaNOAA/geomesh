@@ -1,17 +1,21 @@
 import os
 from typing import Union
 
-# from jigsawpy import jigsaw_msh_t  # type: ignore[import]
+from matplotlib.path import Path  # type: ignore[import]
 import matplotlib.pyplot as plt  # type: ignore[import]
 import mpl_toolkits.mplot3d as m3d  # type: ignore[import]
 import numpy as np  # type: ignore[import]
 from shapely import ops  # type: ignore[import]
+from shapely.geometry import (   # type: ignore[import]
+    Polygon, MultiPolygon, LinearRing)
 
 from geomesh.geom.base import BaseGeom
 from geomesh.raster import Raster
 
 
-class RasterDescriptor:
+class SourceRaster:
+    '''Descriptor class used for referencing a :class:`geomesh.Raster`
+    object.'''
 
     def __set__(self, obj, val: Union[Raster, str, os.PathLike]):
 
@@ -19,49 +23,38 @@ class RasterDescriptor:
             val = Raster(val)
 
         if not isinstance(val, Raster):
-            raise TypeError(f'Argument raster must be of type {Raster}, {str} '
-                            f'or {os.PathLike}, not type {type(val)}')
-
-        obj.__dict__['raster'] = val
+            raise TypeError(
+                f'Argument raster must be of type {Raster}, '
+                f'not type {type(val)}.')
+        obj.__dict__['source_raster'] = val
 
     def __get__(self, obj, val):
-        return obj.__dict__['raster']
+        return obj.__dict__['source_raster']
 
 
 class RasterGeom(BaseGeom):
 
-    _raster = RasterDescriptor()
+    _source_raster = SourceRaster()
 
-    def __init__(
-            self,
-            raster: Union[Raster, str, os.PathLike],
-            zmin: Union[int, float] = None,
-            zmax: Union[int, float] = None,
-            **kwargs
-    ):
+    def __init__(self, raster: Union[Raster, str, os.PathLike]):
         """
         Input parameters
         ----------------
         raster:
             Input object used to compute the output mesh hull.
-        crs:
-            Assigns CRS to geom, required for shapely object.
-            Overrides the input geom crs.
-        ellipsoid:
-            None, False, True, 'WGS84' or '??'
-        zmin:
-            Minimum height/depth to be meshed
-        zmax:
-            Maximum height/depth to be meshed
         """
-        self._raster = raster
-        self._zmin = zmin
-        self._zmax = zmax
+        self._source_raster = raster
 
     def get_multipolygon(self, zmin=None, zmax=None):
+        # TODO: Is it better to partition the raster in windows and parallelize
+        # the computation, or is it better to do the windows in serial for all
+        # use cases?
+        # The current implementation uses serial processing over the raster
+        # windows. This computation uses considerable amounts of memory.
+        # Be aware of memory constraints if parallelizing this function.
         polygon_collection = []
-        for window in self.iter_windows(overlap=2):
-            x, y, z = self.get_window_data(window)
+        for window in self.raster.iter_windows():
+            x, y, z = self.raster.get_window_data(window, band=1)
             new_mask = np.full(z.mask.shape, 0)
             new_mask[np.where(z.mask)] = -1
             new_mask[np.where(~z.mask)] = 1
@@ -76,25 +69,19 @@ class RasterGeom(BaseGeom):
                 continue
 
             else:
-                ax = plt.contourf(
-                    x, y, new_mask[0, :, :], levels=[0, 1])
+                ax = plt.contourf(x, y, new_mask, levels=[0, 1])
                 plt.close(plt.gcf())
-                for polygon in get_multipolygon_from_axes(ax):
-                    polygon_collection.append(polygon)
-
+                polygon_collection.extend(
+                    [polygon for polygon in get_multipolygon_from_axes(ax)])
         return ops.unary_union(polygon_collection)
 
     @property
     def raster(self):
-        return self._raster
+        return self._source_raster
 
     @property
     def crs(self):
         return self.raster.crs
-
-    @property
-    def ndims(self):
-        return self.geom.ndims
 
     def make_plot(
         self,
