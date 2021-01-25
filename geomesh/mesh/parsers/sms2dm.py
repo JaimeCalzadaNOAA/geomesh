@@ -54,7 +54,7 @@ def graph(sms2dm):
 def nodes(sms2dm):
     assert all(int(id) > 0 for id in sms2dm['ND'])
     f = ''
-    for id, (coords, value)in sms2dm['ND'].items():
+    for id, (coords, value) in sms2dm['ND'].items():
         f += f"ND {int(id):d} "
         f += f"{coords[0]:<.16E} "
         f += f"{coords[1]:<.16E} "
