@@ -164,23 +164,9 @@ class HfunRaster(BaseHfun, Raster):
         if target_size <= 0:
             raise ValueError("Argument target_size must be greater than zero.")
 
-        # check nprocs
-        nprocs = -1 if nprocs is None else nprocs
-        nprocs = cpu_count() if nprocs == -1 else nprocs
+        contours = self.get_raster_contours(level)
 
-        if nprocs > 1 and self.raster.chunk_size is not None:
-            contours = get_raster_contours_parallel(
-                self.raster.tmpfile,
-                self.raster.chunk_size,
-                level,
-                nprocs
-            )
-
-        else:
-            contours = get_raster_contours(self.raster.tmpfile, level)
-
-        self.add_feature(ops.linemerge(contours), target_size, expansion_rate,
-                         nprocs)
+        self.add_feature(contours, target_size, expansion_rate, nprocs)
 
     def add_feature(
             self,
@@ -202,6 +188,10 @@ class HfunRaster(BaseHfun, Raster):
         TODO: Consider using BallTree with haversine or Vincenty metrics
         instead of a locally projected window.
         '''
+
+        # Check nprocs
+        nprocs = -1 if nprocs is None else nprocs
+        nprocs = cpu_count() if nprocs == -1 else nprocs
 
         if not isinstance(feature, (LineString, MultiLineString)):
             raise TypeError(
@@ -308,10 +298,35 @@ class HfunRaster(BaseHfun, Raster):
                     self._src.get_values(band=1, window=window),
                     values).reshape((1, *values.shape)).astype(meta['dtype'])
                 dst.write(values, window=window)
-        print('1', self.tmpfile)
         self._tmpfile = tmpfile
-        print('2', self.tmpfile)
-        exit()
+
+    def get_raster_contours(
+            self,
+            level: float,
+            window: rasterio.windows.Window = None
+    ):
+        features = []
+        if window is None:
+            iter_windows = self.raster.iter_windows()
+        else:
+            iter_windows = [window]
+
+        for window in iter_windows:
+            x = self.raster.get_x(window)
+            y = self.raster.get_y(window)
+            values = self.raster.get_values(band=1, window=window)
+            with warnings.catch_warnings():
+                warnings.simplefilter('ignore', UserWarning)
+                ax = plt.contour(x, y, values, levels=[level])
+                plt.close(plt.gcf())
+            for path_collection in ax.collections:
+                for path in path_collection.get_paths():
+                    try:
+                        features.append(LineString(path.vertices))
+                    except ValueError:
+                        # LineStrings must have at least 2 coordinate tuples
+                        pass
+        return ops.linemerge(features)
 
     @property
     def raster(self):
@@ -338,45 +353,30 @@ class HfunRaster(BaseHfun, Raster):
         self._verbosity = verbosity
 
 
-def get_raster_contours_parallel(
-        path,
-        chunk_size,
-        level,
-        nprocs,
-):
-    raster = Raster(path, chunk_size=chunk_size)
-    with Pool(processes=nprocs) as pool:
-        res = pool.starmap(
-            get_raster_contours,
-            [(raster.tmpfile, level, window) for window
-             in raster.iter_windows()]
-        )
-    pool.join()
-    return [line for sublist in res for line in sublist]
+# def get_raster_contour_window_aggregate(
+#         path,
+#         chunk_size,
+#         level,
+# ):
 
+    
 
-def get_raster_contours(
-        path,
-        level: float,
-        window: rasterio.windows.Window = None
-):
-    raster = Raster(path)
-    x = raster.get_x(window)
-    y = raster.get_y(window)
-    values = raster.get_values(band=1, window=window)
-    with warnings.catch_warnings():
-        warnings.simplefilter('ignore', UserWarning)
-        ax = plt.contour(x, y, values, levels=[level])
-        plt.close(plt.gcf())
-    features = []
-    for path_collection in ax.collections:
-        for path in path_collection.get_paths():
-            try:
-                features.append(LineString(path.vertices))
-            except ValueError:
-                # LineStrings must have at least 2 coordinate tuples
-                pass
-    return features
+#     for fname in res:
+#         feather = pathlib.Path(self._tmpdir.name) / fname
+#         rasters_gdf = rasters_gdf.append(
+#             gpd.read_feather(feather),
+#             ignore_index=True)
+#         feather.unlink()
+#     raster = Raster(path, chunk_size=chunk_size)
+#     # with Pool(processes=nprocs) as pool:
+    #     res = pool.starmap(
+    #         get_raster_contours,
+    #         [(raster.tmpfile, level, window) for window
+    #          in raster.iter_windows()]
+    #     )
+    # pool.join()
+    # return [line for sublist in res for line in sublist]
+
 
 
 def resample_features(
