@@ -1,18 +1,21 @@
-from multiprocessing import cpu_count
+import gc
+from multiprocessing import cpu_count, Pool
 import pathlib
+from time import time
 import warnings
 
 import geopandas as gpd  # type: ignore[import]
 from jigsawpy import jigsaw_msh_t, jigsaw_jig_t  # type: ignore[import]
 from jigsawpy.libsaw import jigsaw  # type: ignore[import]
 import matplotlib.pyplot as plt  # type: ignore[import]
+# from matplotlib.tri import Triangulation  # type: ignore[import]
 import numpy as np  # type: ignore[import]
 from pyproj import CRS, Transformer  # type: ignore[import]
 import rasterio  # type: ignore[import]
 from scipy.spatial import cKDTree  # type: ignore[import]
 from shapely import ops  # type: ignore[import]
 from shapely.geometry import (  # type: ignore[import]
-    LineString, MultiLineString, box)
+    LineString, MultiLineString, box, GeometryCollection)
 import tempfile
 from typing import Union
 import utm  # type: ignore[import]
@@ -35,7 +38,7 @@ class HfunInputRaster:
                             f'type {type(raster)}.')
         # init output raster file
         tmpfile = tempfile.NamedTemporaryFile()
-        with rasterio.open(raster.path) as src:
+        with rasterio.open(raster.tmpfile) as src:
             if raster.chunk_size is not None:
                 windows = get_iter_windows(
                     src.width, src.height, chunk_size=raster.chunk_size)
@@ -69,47 +72,71 @@ class HfunRaster(BaseHfun, Raster):
         self._hmax = hmax
         self._verbosity = verbosity
 
-    def get_hmat(self, window: rasterio.windows.Window = None) -> jigsaw_msh_t:
-
-        xgrid = np.array(self.x, dtype=jigsaw_msh_t.REALS_t)
-        ygrid = np.array(self.y, dtype=jigsaw_msh_t.REALS_t)
-        if self.crs.is_geographic:
-            x0, y0, x1, y1 = self.get_window_bounds(window)
-            _, _, number, letter = utm.from_latlon((y0 + y1)/2, (x0 + x1)/2)
-            ellipsoid = self.crs.ellipsoid
-            if ellipsoid == 'GRS 1980':
-                ellipsoid = 'GRS80'
-            dst_crs = CRS(
-                proj='utm',
-                zone=f'{number}{letter}',
-                ellps=ellipsoid
-            )
-            transformer = Transformer.from_crs(
-                self.src.crs, dst_crs, always_xy=True,
-                # TODO: Add pyproj.AreaOfInterest ?
-                )
-            xgrid, ygrid = transformer.transform(xgrid, ygrid)
-        hmat = jigsaw_msh_t()
-        hmat.mshID = 'euclidean-grid'
-        hmat.ndims = +2
-        hmat.xgrid = np.array(xgrid, dtype=jigsaw_msh_t.REALS_t)
-        hmat.ygrid = np.array(np.flip(ygrid), dtype=jigsaw_msh_t.REALS_t)
-        hmat.value = np.array(
-            np.flipud(self.get_values(window=window, band=1)),
-            dtype=jigsaw_msh_t.REALS_t)
-        hmat.crs = dst_crs if self.crs.is_geographic else self.crs
-        return hmat
-
-    def get_hfun(self, window: rasterio.windows.Window = None,
-                 verbosity=None) -> jigsaw_msh_t:
+    def msh_t(self, window: rasterio.windows.Window = None,
+              verbosity=None) -> jigsaw_msh_t:
 
         if window is None:
-            iter_windows = self.iter_windows()
+            iter_windows = list(self.iter_windows())
         else:
             iter_windows = [window]
-
+        if len(iter_windows) > 1:
+            raise NotImplementedError(
+                'iter_windows > 1, need to collect hfuns')
+        dst_crs = None
         for window in iter_windows:
-            hmat = self.get_hmat(window)
+
+            hmat = jigsaw_msh_t()
+            hmat.ndims = +2
+
+            xgrid = np.array(
+                self.get_x(window=window),
+                dtype=jigsaw_msh_t.REALS_t)
+            ygrid = np.array(
+                self.get_y(window=window),
+                dtype=jigsaw_msh_t.REALS_t)
+            x0, y0, x1, y1 = self.get_window_bounds(window)
+
+            kwargs = {}
+
+            if self.crs.is_geographic:
+                _, _, number, letter = utm.from_latlon(
+                    (y0 + y1)/2, (x0 + x1)/2)
+                ellipsoid = {
+                    'GRS 1980': 'GRS80',
+                    'WGS 84': 'WGS84'
+                }[self.crs.ellipsoid.name]
+                dst_crs = CRS(
+                    proj='utm',
+                    zone=f'{number}{letter}',
+                    ellps=ellipsoid
+                )
+                _rast = Raster(self.tmpfile, chunk_size=self.chunk_size)
+                _rast.warp(dst_crs)
+                xgrid, ygrid = _rast.get_x(window), _rast.get_y(window)
+                x0, y0, x1, y1 = _rast.get_window_bounds(window)
+                del _rast
+
+            self.logger.info('Forming initial hmat (euclidean-grid).')
+            start = time()
+            hmat.mshID = 'euclidean-grid'
+            hmat.xgrid = np.array(
+                xgrid,
+                dtype=jigsaw_msh_t.REALS_t)
+            hmat.ygrid = np.array(
+                np.flip(ygrid),
+                dtype=jigsaw_msh_t.REALS_t)
+            hmat.value = np.array(
+                np.flipud(self.get_values(window=window, band=1)),
+                dtype=jigsaw_msh_t.REALS_t)
+            kwargs = {'kx': 1, 'ky': 1}  # type: ignore[dict-item]
+            del xgrid, ygrid
+            gc.collect()
+            geom = PolygonGeom(box(x0, y0, x1, y1)).geom
+
+            self.logger.info(
+                f'Initial hmat generation took {time()-start}.')
+
+            self.logger.info('Configuring jigsaw...')
 
             opts = jigsaw_jig_t()
 
@@ -123,33 +150,28 @@ class HfunRaster(BaseHfun, Raster):
                 self.hmin
             opts.hfun_hmax = np.max(hmat.value) if self.hmax is None else \
                 self.hmax
-
-            opts.verbosity = self.verbosity if verbosity is None else verbosity
+            opts.verbosity = self.verbosity if verbosity is None else \
+                verbosity
 
             # output mesh
             output_mesh = jigsaw_msh_t()
 
-            # generate input geom
-            # NOTE: This implementation uses full bbox. It can also use the
-            # user-speicied geom. More testing is needed.
-            x0, y0, x1, y1 = self.get_window_bounds(window)
-            if self.crs.is_geographic:
-                x0, y0, _, _ = utm.from_latlon(y0, x0)
-                x1, y1, _, _ = utm.from_latlon(y1, x1)
-
             # call jigsaw to create local mesh
             jigsaw(
                 opts,
-                PolygonGeom(box(x0, y0, x1, y1)).geom,
+                geom,
                 output_mesh,
                 hfun=hmat
             )
 
             # do post processing
             utils.cleanup_isolates(output_mesh)
-            utils.interpolate_hmat(output_mesh, hmat, kx=1, ky=1)
-            utils.reproject(output_mesh, hmat.crs, self.crs)
-            return output_mesh
+            utils.interpolate(hmat, output_mesh, **kwargs)
+
+            if dst_crs is not None:
+                utils.reproject(output_mesh, dst_crs, self.crs)
+
+        return output_mesh
 
     def add_contour(
             self,
@@ -161,7 +183,6 @@ class HfunRaster(BaseHfun, Raster):
         """ See https://outline.com/YU7nSM for an excellent explanation about
         tree algorithms.
         """
-
         # check target size
         target_size = self.hmin if target_size is None else target_size
         if target_size is None:
@@ -169,9 +190,11 @@ class HfunRaster(BaseHfun, Raster):
                              'global hmin has been set.')
         if target_size <= 0:
             raise ValueError("Argument target_size must be greater than zero.")
-
-        contours = self.get_raster_contours(level)
-
+        contours = self._get_raster_contours(level)
+        if isinstance(contours, GeometryCollection):
+            self.logger.info('No contours found...')
+            return
+        self.logger.info('Adding contours as features...')
         self.add_feature(contours, target_size, expansion_rate, nprocs)
 
     def add_feature(
@@ -198,7 +221,7 @@ class HfunRaster(BaseHfun, Raster):
         # Check nprocs
         nprocs = -1 if nprocs is None else nprocs
         nprocs = cpu_count() if nprocs == -1 else nprocs
-
+        self.logger.debug(f'Using nprocs={nprocs}')
         if not isinstance(feature, (LineString, MultiLineString)):
             raise TypeError(
                 f'Argument feature must be of type {LineString} or '
@@ -206,51 +229,79 @@ class HfunRaster(BaseHfun, Raster):
 
         if target_size <= 0.:
             raise ValueError('Argument target_size must be > 0.')
-        ellipsoid = self.crs.ellipsoid
-        if ellipsoid == 'GRS 1980':
-            ellipsoid = 'GRS80'
+        ellipsoid = {
+            'GRS 1980': 'GRS80',
+            'WGS 84': 'WGS84'
+            }[self.crs.ellipsoid.name]
         tmpfile = tempfile.NamedTemporaryFile()
         meta = self.src.meta.copy()
         meta.update({'driver': 'GTiff'})
         with rasterio.open(tmpfile, 'w', **meta,) as dst:
-            for window, bounds in self:
+            iter_windows = list(self.iter_windows())
+            tot = len(iter_windows)
+            for i, window in enumerate(iter_windows):
+                self.logger.debug(f'Processing window {i+1}/{tot}.')
                 if self.crs.is_geographic:
-                    x0 = bounds[2] - bounds[0]
-                    y0 = bounds[3] - bounds[1]
-                    _, _, number, letter = utm.from_latlon(x0, y0)
+                    x0, y0, x1, y1 = self.get_window_bounds(window)
+                    _, _, number, letter = utm.from_latlon(
+                        (y0+y1)/2, (x0+x1)/2)
                     dst_crs = CRS(
                         proj='utm',
                         zone=f'{number}{letter}',
                         ellps=ellipsoid
                     )
+                else:
+                    dst_crs = None
+
+                # transformed_features = box(*bounds).intersection(feature)
+                self.logger.info('Resampling features...')
+                start = time()
+                with Pool(processes=nprocs) as pool:
+                    transformed_features = pool.starmap(
+                        transform_features,
+                        [(feat, target_size, self.src.crs, dst_crs) for
+                         feat in feature]
+                    )
+                self.logger.info(f'Resampling features took {time()-start}.')
+                self.logger.info('Concatenating points...')
+                start = time()
+                points = []
+                for geom in transformed_features:
+                    if isinstance(geom, LineString):
+                        points.extend(geom.coords)
+                    elif isinstance(geom, MultiLineString):
+                        for linestring in geom:
+                            points.extend(linestring.coords)
+                self.logger.info(f'Point concatenation took {time()-start}.')
+
+                self.logger.info('Generating KDTree...')
+                start = time()
+                tree = cKDTree(np.array(points))
+                self.logger.info(f'Generating KDTree took {time()-start}.')
+                xy = self.get_xy(window)
+                self.logger.info('Transform points to local CRS...')
+                start = time()
+                if dst_crs is not None:
                     transformer = Transformer.from_crs(
                         self.src.crs, dst_crs, always_xy=True)
-                else:
-                    transformer = None
-                local_feat = box(*bounds).intersection(feature)
-                local_feat = resample_features(
-                    local_feat, target_size, transformer)
-                if not isinstance(local_feat, MultiLineString):
-                    local_feat = MultiLineString([local_feat])
-                points = []
-                for linestring in local_feat:
-                    points.extend(linestring.coords)
-                tree = cKDTree(np.array(points))
-                xy = self.get_xy(window)
-                x = xy[:, 0]
-                y = xy[:, 1]
-                if transformer is not None:
-                    x, y = transformer.transform(x, y)
-                distances, _ = tree.query(np.vstack([x, y]).T, n_jobs=nprocs)
+                    xy = np.vstack(transformer.transform(xy[:, 0], xy[:, 1])).T
+                self.logger.info(f'Transforming points took {time()-start}.')
+                self.logger.info('Querying KDTree...')
+                start = time()
+                distances, _ = tree.query(xy, n_jobs=nprocs)
+                self.logger.info(f'Querying KDTree took {time()-start}.')
                 values = expansion_rate*target_size*distances + target_size
                 values = values.reshape(window.height, window.width).astype(
-                        self.raster.dtype(1))
+                        self.dtype(1))
                 if self.hmin is not None:
                     values[np.where(values < self.hmin)] = self.hmin
                 if self.hmax is not None:
                     values[np.where(values > self.hmax)] = self.hmax
                 values = np.minimum(self.get_values(window=window), values)
+                self.logger.info(f'Write array to file {tmpfile.name}...')
+                start = time()
                 dst.write_band(1, values, window=window)
+                self.logger.info(f'Write array to file took {time()-start}.')
         self._tmpfile = tmpfile
 
     def add_subtidal_flow_limiter(
@@ -306,25 +357,49 @@ class HfunRaster(BaseHfun, Raster):
                 dst.write(values, window=window)
         self._tmpfile = tmpfile
 
-    def get_raster_contours(
+    def _get_raster_contours(
             self,
             level: float,
             window: rasterio.windows.Window = None
     ):
+        self.logger.debug(
+            f'RasterHfun.get_raster_contours(level={level}, window={window})')
         tmpdir = tempfile.TemporaryDirectory()
+        self.logger.info(f'Opened temporary directory: {tmpdir.name}')
         if window is None:
-            iter_windows = self.raster.iter_windows()
+            iter_windows = list(self.raster.iter_windows())
         else:
             iter_windows = [window]
         feathers = []
-        for window in iter_windows:
+        total_windows = len(iter_windows)
+        self.logger.debug(f'Total windows to process: {total_windows}.')
+        for i, window in enumerate(iter_windows):
+            self.logger.debug(f'Processing window {i+1}/{total_windows}.')
+            if self.crs.is_geographic:
+                _, _, number, letter = utm.from_latlon(
+                    (y0 + y1)/2, (x0 + x1)/2)
+                ellipsoid = {
+                    'GRS 1980': 'GRS80',
+                    'WGS 84': 'WGS84'
+                }[self.crs.ellipsoid.name]
+                dst_crs = CRS(
+                    proj='utm',
+                    zone=f'{number}{letter}',
+                    ellps=ellipsoid
+                )
+                _rast = Raster(self.tmpfile, chunk_size=self.chunk_size)
+                _rast.warp(dst_crs)
+                x, y = _rast.get_x(window), _rast.get_y(window)
+                x0, y0, x1, y1 = _rast.get_window_bounds(window)
+                del _rast
             features = []
-            x = self.raster.get_x(window)
-            y = self.raster.get_y(window)
             values = self.raster.get_values(band=1, window=window)
             with warnings.catch_warnings():
                 warnings.simplefilter('ignore', UserWarning)
+                self.logger.debug('Computing contours...')
+                start = time()
                 ax = plt.contour(x, y, values, levels=[level])
+                self.logger.debug(f'Took {time()-start}...')
                 plt.close(plt.gcf())
             for path_collection in ax.collections:
                 for path in path_collection.get_paths():
@@ -337,11 +412,12 @@ class HfunRaster(BaseHfun, Raster):
                 tmpfile = pathlib.Path(tmpdir.name) / pathlib.Path(
                         tempfile.NamedTemporaryFile(suffix='.feather').name
                         ).name
+                self.logger.debug('Saving feather.')
                 gpd.GeoDataFrame(
                     [{'geometry': ops.linemerge(features)}]
                     ).to_feather(tmpfile)
                 feathers.append(tmpfile)
-
+        self.logger.debug('Concatenating feathers.')
         features = []
         out = gpd.GeoDataFrame()
         for feather in feathers:
@@ -352,6 +428,7 @@ class HfunRaster(BaseHfun, Raster):
                     geometry = MultiLineString([geometry])
             for linestring in geometry:
                 features.append(linestring)
+        self.logger.debug('Merging features.')
         return ops.linemerge(features)
 
     @property
@@ -379,17 +456,20 @@ class HfunRaster(BaseHfun, Raster):
         self._verbosity = verbosity
 
 
-def resample_features(
+def transform_features(
     feature: Union[LineString, MultiLineString],
     target_size: float,
-    transformer: Transformer = None
+    src_crs: CRS = None,
+    dst_crs: CRS = None
 ):
     if isinstance(feature, LineString):
         feature = MultiLineString([feature])
     features = []
     for linestring in feature:
         distances = [0.]
-        if transformer is not None:
+        if dst_crs is not None:
+            transformer = Transformer.from_crs(
+                src_crs, dst_crs, always_xy=True)
             linestring = ops.transform(transformer.transform, linestring)
         while distances[-1] + target_size < linestring.length:
             distances.append(distances[-1] + target_size)
@@ -398,16 +478,8 @@ def resample_features(
             linestring.interpolate(distance)
             for distance in distances
             ])
-        # features.extend(linestring.coords)
         features.append(linestring)
     return ops.linemerge(features)
-
-
-
-
-
-
-
 
 
 

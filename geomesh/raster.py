@@ -474,9 +474,11 @@ class Raster:
                 dst.write_band(i, self.src.read(i))
                 dst.update_tags(i, **self.src.tags(i))
 
-    def clip(self, multipolygon):
+    def clip(self, geom: Union[Polygon, MultiPolygon]):
+        if isinstance(geom, Polygon):
+            geom = MultiPolygon([geom])
         out_image, out_transform = rasterio.mask.mask(
-            self._src, multipolygon, crop=True)
+            self.src, geom, crop=True)
         out_meta = self.src.meta.copy()
         out_meta.update({
             "driver": "GTiff",

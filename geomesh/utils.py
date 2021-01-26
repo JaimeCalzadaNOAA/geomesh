@@ -8,7 +8,8 @@ import matplotlib.pyplot as plt  # type: ignore[import]
 from matplotlib.tri import Triangulation  # type: ignore[import]
 import numpy as np  # type: ignore[import]
 from pyproj import CRS, Transformer  # type: ignore[import]
-from scipy.interpolate import RectBivariateSpline  # type: ignore[import]
+from scipy.interpolate import (  # type: ignore[import]
+    RectBivariateSpline, griddata)
 from shapely.geometry import Polygon, MultiPolygon  # type: ignore[import]
 
 
@@ -419,25 +420,56 @@ def cleanup_pinched_nodes(mesh):
         axis=0)
 
 
-def interpolate_hmat(mesh, hmat, method='spline', kx=1, ky=1, **kwargs):
-    assert isinstance(mesh, jigsaw_msh_t)
-    assert isinstance(hmat, jigsaw_msh_t)
-    assert method in ['spline', 'linear', 'nearest']
-    kwargs.update({'kx': kx, 'ky': ky})
-    if method == 'spline':
-        values = RectBivariateSpline(
-            hmat.xgrid,
-            hmat.ygrid,
-            hmat.value.T,
-            **kwargs
-            ).ev(
-            mesh.vert2['coord'][:, 0],
-            mesh.vert2['coord'][:, 1])
-        mesh.value = np.array(
-            values.reshape((values.size, 1)),
-            dtype=jigsaw_msh_t.REALS_t)
+def interpolate(src: jigsaw_msh_t, dst: jigsaw_msh_t, **kwargs):
+    if src.mshID == 'euclidean-grid' and dst.mshID == 'euclidean-mesh':
+        interpolate_euclidean_grid_to_euclidean_mesh(src, dst, **kwargs)
+    elif src.mshID == 'euclidean-mesh' and dst.mshID == 'euclidean-mesh':
+        interpolate_euclidean_mesh_to_euclidean_mesh(src, dst, **kwargs)
     else:
-        raise NotImplementedError("Only 'spline' method is available")
+        raise NotImplementedError(
+            f'Not implemented type combination: source={src.mshID}, '
+            f'dest={dst.mshID}')
+
+
+def interpolate_euclidean_mesh_to_euclidean_mesh(
+        src: jigsaw_msh_t,
+        dst: jigsaw_msh_t,
+        method='linear',
+        fill_value=np.nan
+):
+    values = griddata(
+        src.vert2['coord'],
+        src.value.flatten(),
+        dst.vert2['coord'],
+        method=method,
+        fill_value=fill_value
+    )
+    dst.value = np.array(
+        values.reshape(len(values), 1), dtype=jigsaw_msh_t.REALS_t)
+
+
+def interpolate_euclidean_grid_to_euclidean_mesh(
+        src: jigsaw_msh_t,
+        dst: jigsaw_msh_t,
+        bbox=[None, None, None, None],
+        kx=3,
+        ky=3,
+        s=0
+):
+    values = RectBivariateSpline(
+        src.xgrid,
+        src.ygrid,
+        src.value.T,
+        bbox=bbox,
+        kx=kx,
+        ky=ky,
+        s=s
+        ).ev(
+        dst.vert2['coord'][:, 0],
+        dst.vert2['coord'][:, 1])
+    dst.value = np.array(
+        values.reshape((values.size, 1)),
+        dtype=jigsaw_msh_t.REALS_t)
 
 
 def tricontourf(
