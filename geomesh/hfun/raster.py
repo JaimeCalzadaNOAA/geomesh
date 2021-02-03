@@ -1,28 +1,29 @@
 import gc
 from multiprocessing import cpu_count, Pool
-import pathlib
+# import pathlib
+import tempfile
 from time import time
+from typing import Union
 import warnings
 
-import geopandas as gpd  # type: ignore[import]
-from jigsawpy import jigsaw_msh_t, jigsaw_jig_t  # type: ignore[import]
-from jigsawpy.libsaw import jigsaw  # type: ignore[import]
-import matplotlib.pyplot as plt  # type: ignore[import]
-# from matplotlib.tri import Triangulation  # type: ignore[import]
-import numpy as np  # type: ignore[import]
-from pyproj import CRS, Transformer  # type: ignore[import]
-import rasterio  # type: ignore[import]
-from scipy.spatial import cKDTree  # type: ignore[import]
-from shapely import ops  # type: ignore[import]
-from shapely.geometry import (  # type: ignore[import]
-    LineString, MultiLineString, box, GeometryCollection)
-import tempfile
-from typing import Union
-import utm  # type: ignore[import]
+# import geopandas as gpd
+from jigsawpy import jigsaw_msh_t, jigsaw_jig_t, savemsh, cmd, loadmsh
+from jigsawpy.libsaw import jigsaw
+# import matplotlib.pyplot as plt
+# from matplotlib.tri import Triangulation
+import numpy as np
+from pyproj import CRS, Transformer
+import rasterio
+from scipy.spatial import cKDTree
+from shapely import ops
+from shapely.geometry import (
+    LineString, MultiLineString, box, GeometryCollection, Polygon)
+import utm
 
 from geomesh.hfun.base import BaseHfun
 from geomesh.raster import Raster, get_iter_windows
-from geomesh.geom.shapely import PolygonGeom
+from geomesh.geom.shapely import PolygonGeom, MultiPolygonGeom
+from geomesh.mesh.mesh import EuclideanMesh
 from geomesh import utils
 
 # supress feather warning
@@ -61,9 +62,18 @@ class HfunInputRaster:
         return obj.__dict__['raster']
 
 
+class FeatureCache:
+
+    def __get__(self, obj, val):
+        features = obj.__dict__.get('features')
+        if features is None:
+            features = {}
+
+
 class HfunRaster(BaseHfun, Raster):
 
     _raster = HfunInputRaster()
+    _feature_cache = FeatureCache()
 
     def __init__(self, raster: Raster, hmin: float = None, hmax: float = None,
                  verbosity=0):
@@ -79,62 +89,130 @@ class HfunRaster(BaseHfun, Raster):
             iter_windows = list(self.iter_windows())
         else:
             iter_windows = [window]
-        if len(iter_windows) > 1:
-            raise NotImplementedError(
-                'iter_windows > 1, need to collect hfuns')
-        dst_crs = None
+
+        utm_crs = None
         for window in iter_windows:
 
-            hmat = jigsaw_msh_t()
-            hmat.ndims = +2
+            hfun = jigsaw_msh_t()
+            hfun.ndims = +2
 
-            xgrid = np.array(
-                self.get_x(window=window),
-                dtype=jigsaw_msh_t.REALS_t)
-            ygrid = np.array(
-                self.get_y(window=window),
-                dtype=jigsaw_msh_t.REALS_t)
             x0, y0, x1, y1 = self.get_window_bounds(window)
 
-            kwargs = {}
-
             if self.crs.is_geographic:
+                hfun.mshID = 'euclidean-mesh'
+                # If these 3 objects (vert2, tria3, value) don't fit into
+                # memroy, then the raster needs to be chunked. We need to
+                # implement auto-chunking.
+                start = time()
                 _, _, number, letter = utm.from_latlon(
                     (y0 + y1)/2, (x0 + x1)/2)
-                ellipsoid = {
-                    'GRS 1980': 'GRS80',
-                    'WGS 84': 'WGS84'
-                }[self.crs.ellipsoid.name]
-                dst_crs = CRS(
+                utm_crs = CRS(
                     proj='utm',
                     zone=f'{number}{letter}',
-                    ellps=ellipsoid
+                    ellps={
+                        'GRS 1980': 'GRS80',
+                        'WGS 84': 'WGS84'
+                        }[self.crs.ellipsoid.name]
                 )
-                _rast = Raster(self.tmpfile, chunk_size=self.chunk_size)
-                _rast.warp(dst_crs)
-                xgrid, ygrid = _rast.get_x(window), _rast.get_y(window)
-                x0, y0, x1, y1 = _rast.get_window_bounds(window)
-                del _rast
+                # get bbox data
+                xgrid = self.get_x(window=window)
+                ygrid = np.flip(self.get_y(window=window))
+                xgrid, ygrid = np.meshgrid(xgrid, ygrid)
+                bottom = xgrid[0, :]
+                top = xgrid[1, :]
+                del xgrid
+                left = ygrid[:, 0]
+                right = ygrid[:, 1]
+                del ygrid
 
-            self.logger.info('Forming initial hmat (euclidean-grid).')
-            start = time()
-            hmat.mshID = 'euclidean-grid'
-            hmat.xgrid = np.array(
-                xgrid,
-                dtype=jigsaw_msh_t.REALS_t)
-            hmat.ygrid = np.array(
-                np.flip(ygrid),
-                dtype=jigsaw_msh_t.REALS_t)
-            hmat.value = np.array(
-                np.flipud(self.get_values(window=window, band=1)),
-                dtype=jigsaw_msh_t.REALS_t)
-            kwargs = {'kx': 1, 'ky': 1}  # type: ignore[dict-item]
-            del xgrid, ygrid
-            gc.collect()
-            geom = PolygonGeom(box(x0, y0, x1, y1)).geom
+                self.logger.info('Building hfun.tria3...')
+                dim1 = window.width
+                dim2 = window.height
+                tria3 = []
+                for jpos in range(dim2 - 1):
 
-            self.logger.info(
-                f'Initial hmat generation took {time()-start}.')
+                    triaA = np.empty(
+                        (dim1 - 1),
+                        dtype=jigsaw_msh_t.TRIA3_t)
+
+                    index = triaA["index"]
+                    index[:, 0] = range(0, dim1 - 1)
+                    index[:, 0] += (jpos + 0) * dim1
+
+                    index[:, 1] = range(1, dim1 - 0)
+                    index[:, 1] += (jpos + 0) * dim1
+
+                    index[:, 2] = range(1, dim1 - 0)
+                    index[:, 2] += (jpos + 1) * dim1
+
+                    tria3.append(index)
+                    triaB = np.empty((dim1 - 1), dtype=jigsaw_msh_t.TRIA3_t)
+
+                    index = triaB["index"]
+                    index[:, 0] = range(0, dim1 - 1)
+                    index[:, 0] += (jpos + 0) * dim1
+
+                    index[:, 1] = range(1, dim1 - 0)
+                    index[:, 1] += (jpos + 1) * dim1
+
+                    index[:, 2] = range(0, dim1 - 1)
+                    index[:, 2] += (jpos + 1) * dim1
+                hfun.tria3 = np.array(
+                    [(index, 0) for index in np.vstack(tria3)],
+                    dtype=jigsaw_msh_t.TRIA3_t)
+                del tria3
+                gc.collect()
+                self.logger.info('Done building hfun.tria3...')
+
+                # BUILD VERT2_t. this one comes from the memcache array
+                self.logger.info('Building hfun.vert2...')
+                hfun.vert2 = np.empty(
+                    window.width*window.height,
+                    dtype=jigsaw_msh_t.VERT2_t)
+                hfun.vert2['coord'] = np.array(
+                    self.get_xy_memcache(window, utm_crs))
+                self.logger.info('Done building hfun.vert2...')
+
+                # Build REALS_t: this one comes from hfun raster
+                self.logger.info('Building hfun.value...')
+                hfun.value = np.array(
+                    self.get_values(window=window, band=1).flatten().reshape(
+                        (window.width*window.height, 1)).astype(np.float32),
+                    dtype=jigsaw_msh_t.REALS_t)
+                self.logger.info('Done building hfun.value...')
+
+                # Build Geom
+                self.logger.info('Building initial geom...')
+                transformer = Transformer.from_crs(
+                    self.crs, utm_crs, always_xy=True)
+                bbox = [
+                    *[(x, left[0]) for x in bottom],
+                    *[(bottom[-1], y) for y in reversed(right)],
+                    *[(x, right[-1]) for x in reversed(top)],
+                    *[(bottom[0], y) for y in reversed(left)]]
+                geom = PolygonGeom(
+                    ops.transform(transformer.transform, Polygon(bbox)),
+                ).geom
+                self.logger.info('Building initial geom done.')
+                kwargs = {'method': 'nearest'}
+
+            else:
+                self.logger.info('Forming initial hmat (euclidean-grid).')
+                start = time()
+                hfun.mshID = 'euclidean-grid'
+                hfun.xgrid = np.array(
+                    np.array(self.get_x(window=window)),
+                    dtype=jigsaw_msh_t.REALS_t)
+                hfun.ygrid = np.array(
+                    np.flip(self.get_y(window=window)),
+                    dtype=jigsaw_msh_t.REALS_t)
+                hfun.value = np.array(
+                    np.flipud(self.get_values(window=window, band=1)),
+                    dtype=jigsaw_msh_t.REALS_t)
+                kwargs = {'kx': 1, 'ky': 1}  # type: ignore[dict-item]
+                geom = PolygonGeom(box(x0, y0, x1, y1)).geom
+
+            self.logger.info(f'Initial hfun generation took {time()-start}.')
 
             self.logger.info('Configuring jigsaw...')
 
@@ -146,30 +224,38 @@ class HfunRaster(BaseHfun, Raster):
             # no need to optimize for size function generation
             opts.optm_tria = False
 
-            opts.hfun_hmin = np.min(hmat.value) if self.hmin is None else \
+            opts.hfun_hmin = np.min(hfun.value) if self.hmin is None else \
                 self.hmin
-            opts.hfun_hmax = np.max(hmat.value) if self.hmax is None else \
+            opts.hfun_hmax = np.max(hfun.value) if self.hmax is None else \
                 self.hmax
             opts.verbosity = self.verbosity if verbosity is None else \
                 verbosity
 
             # output mesh
             output_mesh = jigsaw_msh_t()
+            output_mesh.mshID = 'euclidean-mesh'
+            output_mesh.ndims = +2
 
-            # call jigsaw to create local mesh
             jigsaw(
                 opts,
                 geom,
                 output_mesh,
-                hfun=hmat
+                hfun=hfun
             )
-
+            del geom
             # do post processing
-            utils.cleanup_isolates(output_mesh)
-            utils.interpolate(hmat, output_mesh, **kwargs)
+            hfun.crs = utm_crs
+            utils.interpolate(hfun, output_mesh, **kwargs)
 
-            if dst_crs is not None:
-                utils.reproject(output_mesh, dst_crs, self.crs)
+            if utm_crs is not None:
+                output_mesh.crs = utm_crs
+                utils.reproject(output_mesh, self.crs)
+            else:
+                output_mesh.crs = self.crs
+
+            if len(iter_windows) > 1:
+                raise NotImplementedError(
+                    'iter_windows > 1, need to collect hfuns')
 
         return output_mesh
 
@@ -183,25 +269,18 @@ class HfunRaster(BaseHfun, Raster):
         """ See https://outline.com/YU7nSM for an excellent explanation about
         tree algorithms.
         """
-        # check target size
-        target_size = self.hmin if target_size is None else target_size
-        if target_size is None:
-            raise ValueError('Argument target_size must be specified if no '
-                             'global hmin has been set.')
-        if target_size <= 0:
-            raise ValueError("Argument target_size must be greater than zero.")
-        contours = self._get_raster_contours(level)
+        contours = self.raster.get_contour(level)
         if isinstance(contours, GeometryCollection):
             self.logger.info('No contours found...')
             return
         self.logger.info('Adding contours as features...')
-        self.add_feature(contours, target_size, expansion_rate, nprocs)
+        self.add_feature(contours, expansion_rate, target_size, nprocs)
 
     def add_feature(
             self,
             feature: Union[LineString, MultiLineString],
-            target_size: float,
             expansion_rate: float,
+            target_size: float = None,
             nprocs=None,
     ):
         '''Adds a linear distance size function constraint to the mesh.
@@ -227,15 +306,20 @@ class HfunRaster(BaseHfun, Raster):
                 f'Argument feature must be of type {LineString} or '
                 f'{MultiLineString}, not type {type(feature)}.')
 
-        if target_size <= 0.:
-            raise ValueError('Argument target_size must be > 0.')
-        ellipsoid = {
-            'GRS 1980': 'GRS80',
-            'WGS 84': 'WGS84'
-            }[self.crs.ellipsoid.name]
+        if isinstance(feature, LineString):
+            feature = MultiLineString([feature])
+
+        # check target size
+        target_size = self.hmin if target_size is None else target_size
+        if target_size is None:
+            raise ValueError('Argument target_size must be specified if no '
+                             'global hmin has been set.')
+        if target_size <= 0:
+            raise ValueError("Argument target_size must be greater than zero.")
         tmpfile = tempfile.NamedTemporaryFile()
         meta = self.src.meta.copy()
         meta.update({'driver': 'GTiff'})
+        utm_crs: Union[CRS, None] = None
         with rasterio.open(tmpfile, 'w', **meta,) as dst:
             iter_windows = list(self.iter_windows())
             tot = len(iter_windows)
@@ -244,22 +328,23 @@ class HfunRaster(BaseHfun, Raster):
                 if self.crs.is_geographic:
                     x0, y0, x1, y1 = self.get_window_bounds(window)
                     _, _, number, letter = utm.from_latlon(
-                        (y0+y1)/2, (x0+x1)/2)
-                    dst_crs = CRS(
+                        (y0 + y1)/2, (x0 + x1)/2)
+                    utm_crs = CRS(
                         proj='utm',
                         zone=f'{number}{letter}',
-                        ellps=ellipsoid
+                        ellps={
+                            'GRS 1980': 'GRS80',
+                            'WGS 84': 'WGS84'
+                            }[self.crs.ellipsoid.name]
                     )
                 else:
-                    dst_crs = None
-
-                # transformed_features = box(*bounds).intersection(feature)
+                    utm_crs = None
                 self.logger.info('Resampling features...')
                 start = time()
                 with Pool(processes=nprocs) as pool:
                     transformed_features = pool.starmap(
                         transform_features,
-                        [(feat, target_size, self.src.crs, dst_crs) for
+                        [(feat, target_size, self.src.crs, utm_crs) for
                          feat in feature]
                     )
                 self.logger.info(f'Resampling features took {time()-start}.')
@@ -278,13 +363,11 @@ class HfunRaster(BaseHfun, Raster):
                 start = time()
                 tree = cKDTree(np.array(points))
                 self.logger.info(f'Generating KDTree took {time()-start}.')
-                xy = self.get_xy(window)
-                self.logger.info('Transform points to local CRS...')
-                start = time()
-                if dst_crs is not None:
-                    transformer = Transformer.from_crs(
-                        self.src.crs, dst_crs, always_xy=True)
-                    xy = np.vstack(transformer.transform(xy[:, 0], xy[:, 1])).T
+                if utm_crs is not None:
+                    xy = self.get_xy_memcache(window, utm_crs)
+                else:
+                    xy = self.get_xy(window)
+
                 self.logger.info(f'Transforming points took {time()-start}.')
                 self.logger.info('Querying KDTree...')
                 start = time()
@@ -292,7 +375,7 @@ class HfunRaster(BaseHfun, Raster):
                 self.logger.info(f'Querying KDTree took {time()-start}.')
                 values = expansion_rate*target_size*distances + target_size
                 values = values.reshape(window.height, window.width).astype(
-                        self.dtype(1))
+                    self.dtype(1))
                 if self.hmin is not None:
                     values[np.where(values < self.hmin)] = self.hmin
                 if self.hmax is not None:
@@ -303,6 +386,29 @@ class HfunRaster(BaseHfun, Raster):
                 dst.write_band(1, values, window=window)
                 self.logger.info(f'Write array to file took {time()-start}.')
         self._tmpfile = tmpfile
+
+    def get_xy_memcache(self, window, dst_crs):
+        if not hasattr(self, '_xy_cache'):
+            self._xy_cache = {}
+        tmpfile = self._xy_cache.get(f'{window}{dst_crs}')
+        if tmpfile is None:
+            self.logger.info('Transform points to local CRS...')
+            transformer = Transformer.from_crs(
+                self.src.crs, dst_crs, always_xy=True)
+            tmpfile = tempfile.NamedTemporaryFile()
+            xy = self.get_xy(window)
+            fp = np.memmap(tmpfile, dtype='float32', mode='w+', shape=xy.shape)
+            fp[:] = np.vstack(
+                transformer.transform(xy[:, 0], xy[:, 1])).T
+            self.logger.info('Saving values to memcache...')
+            fp.flush()
+            self.logger.info('Done!')
+            self._xy_cache[f'{window}{dst_crs}'] = tmpfile
+            return fp[:]
+        else:
+            self.logger.info('Loading values from memcache...')
+            return np.memmap(tmpfile, dtype='float32', mode='r',
+                             shape=((window.width*window.height), 2))[:]
 
     def add_subtidal_flow_limiter(
             self,
@@ -357,80 +463,6 @@ class HfunRaster(BaseHfun, Raster):
                 dst.write(values, window=window)
         self._tmpfile = tmpfile
 
-    def _get_raster_contours(
-            self,
-            level: float,
-            window: rasterio.windows.Window = None
-    ):
-        self.logger.debug(
-            f'RasterHfun.get_raster_contours(level={level}, window={window})')
-        tmpdir = tempfile.TemporaryDirectory()
-        self.logger.info(f'Opened temporary directory: {tmpdir.name}')
-        if window is None:
-            iter_windows = list(self.raster.iter_windows())
-        else:
-            iter_windows = [window]
-        feathers = []
-        total_windows = len(iter_windows)
-        self.logger.debug(f'Total windows to process: {total_windows}.')
-        for i, window in enumerate(iter_windows):
-            self.logger.debug(f'Processing window {i+1}/{total_windows}.')
-            if self.crs.is_geographic:
-                _, _, number, letter = utm.from_latlon(
-                    (y0 + y1)/2, (x0 + x1)/2)
-                ellipsoid = {
-                    'GRS 1980': 'GRS80',
-                    'WGS 84': 'WGS84'
-                }[self.crs.ellipsoid.name]
-                dst_crs = CRS(
-                    proj='utm',
-                    zone=f'{number}{letter}',
-                    ellps=ellipsoid
-                )
-                _rast = Raster(self.tmpfile, chunk_size=self.chunk_size)
-                _rast.warp(dst_crs)
-                x, y = _rast.get_x(window), _rast.get_y(window)
-                x0, y0, x1, y1 = _rast.get_window_bounds(window)
-                del _rast
-            features = []
-            values = self.raster.get_values(band=1, window=window)
-            with warnings.catch_warnings():
-                warnings.simplefilter('ignore', UserWarning)
-                self.logger.debug('Computing contours...')
-                start = time()
-                ax = plt.contour(x, y, values, levels=[level])
-                self.logger.debug(f'Took {time()-start}...')
-                plt.close(plt.gcf())
-            for path_collection in ax.collections:
-                for path in path_collection.get_paths():
-                    try:
-                        features.append(LineString(path.vertices))
-                    except ValueError:
-                        # LineStrings must have at least 2 coordinate tuples
-                        pass
-            if len(features) > 0:
-                tmpfile = pathlib.Path(tmpdir.name) / pathlib.Path(
-                        tempfile.NamedTemporaryFile(suffix='.feather').name
-                        ).name
-                self.logger.debug('Saving feather.')
-                gpd.GeoDataFrame(
-                    [{'geometry': ops.linemerge(features)}]
-                    ).to_feather(tmpfile)
-                feathers.append(tmpfile)
-        self.logger.debug('Concatenating feathers.')
-        features = []
-        out = gpd.GeoDataFrame()
-        for feather in feathers:
-            out = out.append(gpd.read_feather(feather), ignore_index=True)
-            feather.unlink()
-            for geometry in out.geometry:
-                if isinstance(geometry, LineString):
-                    geometry = MultiLineString([geometry])
-            for linestring in geometry:
-                features.append(linestring)
-        self.logger.debug('Merging features.')
-        return ops.linemerge(features)
-
     @property
     def raster(self):
         return self._raster
@@ -456,20 +488,25 @@ class HfunRaster(BaseHfun, Raster):
         self._verbosity = verbosity
 
 
+def transform_point(x, y, src_crs, utm_crs):
+    transformer = Transformer.from_crs(src_crs, utm_crs, always_xy=True)
+    return transformer.transform(x, y)
+
+
 def transform_features(
     feature: Union[LineString, MultiLineString],
     target_size: float,
     src_crs: CRS = None,
-    dst_crs: CRS = None
+    utm_crs: CRS = None
 ):
     if isinstance(feature, LineString):
         feature = MultiLineString([feature])
     features = []
     for linestring in feature:
         distances = [0.]
-        if dst_crs is not None:
+        if utm_crs is not None:
             transformer = Transformer.from_crs(
-                src_crs, dst_crs, always_xy=True)
+                src_crs, utm_crs, always_xy=True)
             linestring = ops.transform(transformer.transform, linestring)
         while distances[-1] + target_size < linestring.length:
             distances.append(distances[-1] + target_size)
@@ -518,9 +555,9 @@ def transform_features(
 #         for window in self._src.iter_windows():
 #             xy = self._src.get_xy(window)
 #             _tx, _ty, zone, _ = utm.from_latlon(xy[:, 1], xy[:, 0])
-#             dst_crs = CRS(proj='utm', zone=zone, ellps='WGS84')
+#             utm_crs = CRS(proj='utm', zone=zone, ellps='WGS84')
 #             transformer = Transformer.from_crs(
-#                 self._src.crs, dst_crs, always_xy=True)
+#                 self._src.crs, utm_crs, always_xy=True)
 #             res = []
 #             for linestring in feature:
 #                 distances = [0]
@@ -846,3 +883,94 @@ def transform_features(
 #         res.extend(
 #             get_raster_contours(
 #                 self._raster._tmpfile, window, level, target_size))
+
+
+# self.logger.info('Building hfun.tria3...')
+# dim1 = self.width
+# dim2 = self.height
+# hfun.tria3 = np.empty(
+#     self.height*self.width*2,
+#     dtype=jigsaw_msh_t.TRIA3_t)
+# start_pos = 0
+# for jpos in range(dim2 - 1):
+
+#     triaA = np.empty(
+#         (dim1 - 1),
+#         dtype=jigsaw_msh_t.TRIA3_t)
+
+#     index = triaA["index"]
+#     index[:, 0] = range(0, dim1 - 1)
+#     index[:, 0] += (jpos + 0) * dim1
+
+#     index[:, 1] = range(1, dim1 - 0)
+#     index[:, 1] += (jpos + 0) * dim1
+
+#     index[:, 2] = range(1, dim1 - 0)
+#     index[:, 2] += (jpos + 1) * dim1
+#     end_pos = start_pos + index.shape[0]
+#     print(index.shape, hfun.tria3['index'][start_pos:end_pos, :].shape, start_pos, end_pos)
+#     hfun.tria3['index'][start_pos:end_pos, :] = index
+#     start_pos = end_pos + 1
+
+#     triaB = np.empty((dim1 - 1), dtype=jigsaw_msh_t.TRIA3_t)
+
+#     index = triaB["index"]
+#     index[:, 0] = range(0, dim1 - 1)
+#     index[:, 0] += (jpos + 0) * dim1
+
+#     index[:, 1] = range(1, dim1 - 0)
+#     index[:, 1] += (jpos + 1) * dim1
+
+#     index[:, 2] = range(0, dim1 - 1)
+#     index[:, 2] += (jpos + 1) * dim1
+#     end_pos = start_pos + index.shape[0]
+#     print(index.shape, hfun.tria3['index'][start_pos:end_pos, :].shape, start_pos, end_pos)
+#     hfun.tria3['index'][start_pos:end_pos, :] = index
+#     start_pos = end_pos + 1
+# self.logger.info('Done building hfun.tria3...')
+
+
+
+                # self.logger.info('Building hfun.tria3...')
+                # dim1 = self.width
+                # dim2 = self.height
+                # hfun.tria3 = np.empty(+0, dtype=jigsaw_msh_t.TRIA3_t)
+                # tria3 = []
+                # for jpos in range(dim2 - 1):
+
+                #     triaA = np.empty(
+                #         (dim1 - 1),
+                #         dtype=jigsaw_msh_t.TRIA3_t)
+
+                #     index = triaA["index"]
+                #     index[:, 0] = range(0, dim1 - 1)
+                #     index[:, 0] += (jpos + 0) * dim1
+
+                #     index[:, 1] = range(1, dim1 - 0)
+                #     index[:, 1] += (jpos + 0) * dim1
+
+                #     index[:, 2] = range(1, dim1 - 0)
+                #     index[:, 2] += (jpos + 1) * dim1
+
+                #     tria3.append(index)
+                #     triaB = np.empty((dim1 - 1), dtype=jigsaw_msh_t.TRIA3_t)
+
+                #     index = triaB["index"]
+                #     index[:, 0] = range(0, dim1 - 1)
+                #     index[:, 0] += (jpos + 0) * dim1
+
+                #     index[:, 1] = range(1, dim1 - 0)
+                #     index[:, 1] += (jpos + 1) * dim1
+
+                #     index[:, 2] = range(0, dim1 - 1)
+                #     index[:, 2] += (jpos + 1) * dim1
+                #     tria3.append(index)
+                # tria3 = np.vstack(tria3)
+                # breakpoint()
+                # hfun.tria3['index'] = np.vstack(tria3)
+                # del tria3
+                # gc.collect()
+                # # hfun.tria3 = np.array(
+                # #     [(index, 0) for index in np.vstack(tria3)],
+                # #     dtype=jigsaw_msh_t.TRIA3_t)
+                # self.logger.info('Done building hfun.tria3...')

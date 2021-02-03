@@ -1,6 +1,7 @@
 from collections import defaultdict
+from enum import Enum
 from itertools import permutations
-from typing import Union
+from typing import Union, Dict
 
 from jigsawpy import jigsaw_msh_t  # type: ignore[import]
 from matplotlib.path import Path  # type: ignore[import]
@@ -11,6 +12,8 @@ from pyproj import CRS, Transformer  # type: ignore[import]
 from scipy.interpolate import (  # type: ignore[import]
     RectBivariateSpline, griddata)
 from shapely.geometry import Polygon, MultiPolygon  # type: ignore[import]
+
+from geomesh.mesh.parsers import grd, sms2dm
 
 
 def mesh_to_tri(mesh):
@@ -522,10 +525,9 @@ def triplot(
 
 def reproject(
         mesh: jigsaw_msh_t,
-        mesh_crs: Union[str, CRS],
         dst_crs: Union[str, CRS]
 ):
-    src_crs = CRS.from_user_input(mesh_crs)
+    src_crs = mesh.crs
     dst_crs = CRS.from_user_input(dst_crs)
     transformer = Transformer.from_crs(src_crs, dst_crs, always_xy=True)
     x, y = transformer.transform(
@@ -534,6 +536,7 @@ def reproject(
         [([x[i], y[i]], mesh.vert2['IDtag'][i]) for i
          in range(len(mesh.vert2['IDtag']))],
         dtype=jigsaw_msh_t.VERT2_t)
+    mesh.crs = dst_crs
 
 
 def limgrad(mesh, dfdx, imax=100):
@@ -578,3 +581,48 @@ def limgrad(mesh, dfdx, imax=100):
         msg = f'limgrad() did not converge within {imax} iterations.'
         raise Exception(msg)
     return ffun
+
+
+def msh_t_to_grd(msh: jigsaw_msh_t) -> Dict:
+    raise NotImplementedError('utils.msh_t_to_grd')
+
+
+def grd_to_msh_t(_grd: Dict) -> jigsaw_msh_t:
+    msh = jigsaw_msh_t()
+    msh.ndims = +2
+    msh.mshID = 'euclidean-mesh'
+    triangles = [element for element in _grd['elements'] if len(element) == 3]
+    quads = [element for element in _grd['elements'] if len(element) == 4]
+    msh.vert2 = np.array([(coord, 0) for coord, _ in _grd['nodes'].values()],
+                         dtype=jigsaw_msh_t.VERT2_t)
+    msh.tria3 = np.array([(index, 0) for index in triangles],
+                         dtype=jigsaw_msh_t.TRIA3_t)
+    msh.quad4 = np.array([(index, 0) for index in quads],
+                         dtype=jigsaw_msh_t.QUAD4_t)
+    value = [value for _, value in _grd['nodes'].values()]
+    msh.value = np.array(np.array(value).reshape((len(value), 1)),
+                         dtype=jigsaw_msh_t.REALS_t)
+    crs = _grd.get('crs')
+    if crs is not None:
+        msh.crs = CRS.from_user_input(crs)
+    return msh
+
+
+def msh_t_to_2dm(msh: jigsaw_msh_t):
+    coords = msh.vert2['coord']
+    src_crs = msh.crs if hasattr(msh, 'crs') else None
+    if src_crs is not None:
+        EPSG_4326 = CRS.from_epsg(4326)
+        if not src_crs.equals(EPSG_4326):
+            transformer = Transformer.from_crs(
+                src_crs, EPSG_4326, always_xy=True)
+            coords = np.vstack(
+                transformer.transform(coords[:, 0], coords[:, 1])).T
+    return {
+            'ND': {i+1: (coord, msh.value[i, 0]) for i, coord
+                   in enumerate(coords)},
+            'E3T': {i+1: index+1 for i, index
+                    in enumerate(msh.tria3['index'])},
+            'E4Q': {i+1: index+1 for i, index
+                    in enumerate(msh.quad4['index'])}
+        }
