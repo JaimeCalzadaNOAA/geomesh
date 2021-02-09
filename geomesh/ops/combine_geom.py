@@ -135,7 +135,12 @@ class GeomCombine:
                 )
             for feather_f in poly_files_coll:
                 rasters_gdf = rasters_gdf.append(
-                    gpd.read_feather(feather_f), ignore_index=True)
+                    gpd.GeoDataFrame(
+                        {'geometry':self._get_valid_multipolygon(
+                            MultiPolygon([
+                                geom for geom in
+                                gpd.read_feather(feather_f).geometry]))}),
+                    ignore_index=True)
 
             # unary union of raster geoms
             _logger.info('Generate unary union of raster geoms...')
