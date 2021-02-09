@@ -12,6 +12,7 @@ from jigsawpy import jigsaw_msh_t, savemsh, savevtk
 import numpy as np
 from shapely import ops
 from shapely.geometry import box, Polygon, MultiPolygon, LinearRing
+from shapely.validation import explain_validity
 
 
 from geomesh import Raster, Geom
@@ -63,6 +64,9 @@ class GeomCombine:
         nprocs = self._operation_info['nprocs']
 
         nprocs = cpu_count() if nprocs == -1 else nprocs
+        
+        out_dir = pathlib.Path(out_file).parent
+        out_dir.mkdir(exist_ok=True, parents=True)
 
         base_mult_poly = None
         if mesh_file and pathlib.Path(mesh_file).is_file():
@@ -74,12 +78,12 @@ class GeomCombine:
             base_mult_poly = base_mesh.hull.multipolygon()
             _logger.info("Done")
 
+            base_mult_poly = self._get_valid_multipolygon(base_mult_poly)
+
             # NOTE: This needs to happen once and before any
             # modification to basemesh happens (due to overlap
             # w/ DEM, etc.). Exterior of base mesh is used for
             # raster clipping
-            if isinstance(base_mult_poly, Polygon):
-                base_mult_poly = MultiPolygon([base_mult_poly])
             self._base_exterior = MultiPolygon(
                     [i for i in ops.polygonize(
                         [poly.exterior for poly in base_mult_poly])])
@@ -93,8 +97,6 @@ class GeomCombine:
 
         poly_files_coll = list()
         _logger.info(f"Number of processes: {nprocs}")
-        out_dir = pathlib.Path(out_file).parent
-        out_dir.mkdir(exist_ok=True, parents=True)
         with tempfile.TemporaryDirectory(dir=out_dir) as temp_dir, \
                 tempfile.NamedTemporaryFile() as base_file:
 
@@ -156,8 +158,9 @@ class GeomCombine:
 
                 fin_mult_poly = ops.unary_union(poly_coll)
 
-        if isinstance(fin_mult_poly, Polygon):
-            fin_mult_poly = MultiPolygon([fin_mult_poly])
+
+        # Get a clean multipolygon to write to output
+        fin_mult_poly = self._get_valid_multipolygon(fin_mult_poly)
 
         # TODO: Consider projection(?)
         self._write_to_file(
@@ -165,6 +168,24 @@ class GeomCombine:
 
         self._base_exterior = None
 
+    def _get_valid_multipolygon(
+            self,
+            polygon: Union[Polygon, MultiPolygon]
+            ) -> MultiPolygon:
+
+        if not polygon.is_valid:
+            polygon = ops.unary_union(polygon)
+
+            if not polygon.is_valid:
+                polygon = polygon.buffer(0)
+
+            if not polygon.is_valid:
+                raise ValueError(explain_validity(polygon))
+
+        if isinstance(polygon, Polygon):
+            polygon = MultiPolygon([polygon])
+
+        return polygon
 
     def _serial_get_polygon(
             self,
@@ -211,21 +232,27 @@ class GeomCombine:
                 _logger.info("Subtract DEM bounds from base mesh polygons...")
                 self._base_mesh_lock.acquire()
                 try:
+                    # Get a valid multipolygon from disk
                     base_mult_poly = MultiPolygon(
                             [i for i in gpd.read_feather(
                                 base_mesh_path).geometry])
+                    base_mult_poly = self._get_valid_multipolygon(
+                            base_mult_poly)
+
+                    # Get valid multipolygon after operation and write
                     base_mult_poly = base_mult_poly.difference(
                             rast_box)
-                    if isinstance(base_mult_poly, Polygon):
-                        base_mult_poly = MultiPolygon([base_mult_poly])
+                    base_mult_poly = self._get_valid_multipolygon(
+                            base_mult_poly)
                     gpd.GeoDataFrame(
                             {'geometry': base_mult_poly}).to_feather(
                                 base_mesh_path)
                 finally:
                     self._base_mesh_lock.release()
 
-            if isinstance(geom_mult_poly, Polygon):
-                geom_mult_poly = MultiPolygon([geom_mult_poly])
+            # Get a valid polygon from raster
+            geom_mult_poly = self._get_valid_multipolygon(
+                    geom_mult_poly)
             temp_path = (
                     pathlib.Path(temp_dir)
                     / f'{pathlib.Path(dem_path).name}.shp')
