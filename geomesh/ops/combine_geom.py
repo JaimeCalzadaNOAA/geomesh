@@ -121,6 +121,10 @@ class GeomCombine:
                 with Pool(processes=n_proc_dem) as p:
                     poly_files_coll = p.starmap(
                         self._parallel_get_polygon_worker, parallel_args)
+                    # If a DEM doesn't intersect domain None will
+                    # be returned by worker
+                    poly_files_coll = [
+                        i for i in poly_files_coll if i]
             else:
                 poly_files_coll = self._serial_get_polygon(
                     base_mesh_path, temp_dir, dem_files,
@@ -223,7 +227,11 @@ class GeomCombine:
             if base_mesh_path is not None:
                 # NOTE: We use the exterior from the earlier calc
                 if not rast_box.within(self._base_exterior):
-                    _logger.info("Needs clipping...")
+                    if not rast_box.intersects(self._base_exterior):
+                        _logger.info(f"{dem_path} is ignored ...")
+                        continue
+
+                    _logger.info(f"{dem_path} needs clipping...")
                     rast.clip(self._base_exterior)
                     rast_box = box(*rast.src.bounds)
 
@@ -285,12 +293,12 @@ class GeomCombine:
             chunk_size: Union[int, None] = None,
             overlap: Union[int, None] = None):
 
-        poly_coll = self._serial_get_polygon(
+        poly_coll_files = self._serial_get_polygon(
             base_mesh_path, temp_dir, [dem_file],
             z_info, chunk_size, overlap)
 
-        # Only one item passed to serial code
-        return poly_coll[0]
+        # Only one item passed to serial code at most
+        return poly_coll_files[0] if poly_coll_files else None
 
 
     def _linearring_to_vert_edge(
