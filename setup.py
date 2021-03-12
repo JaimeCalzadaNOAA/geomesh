@@ -1,15 +1,22 @@
 #! /usr/bin/env python
 import setuptools
-import subprocess
-import setuptools.command.build_py
 import distutils.cmd
 import distutils.util
-import shutil
-import platform
 from multiprocessing import cpu_count
-from pathlib import Path
-import sys
 import os
+from pathlib import Path
+import platform
+import shutil
+import setuptools.command.build_py
+import subprocess
+import sys
+import tempfile
+
+subprocess.check_call(
+                    [sys.executable, "-m", "pip", 'install', '-U', 'pip'])
+
+subprocess.check_call(
+                    [sys.executable, "-m", "pip", 'install', 'wheel'])
 
 PARENT = Path(__file__).parent.absolute()
 PYENV_PREFIX = Path("/".join(sys.executable.split('/')[:-2]))
@@ -39,13 +46,16 @@ class InstallJigsawCommand(distutils.cmd.Command):
     def run(self):
         self.announce('Loading JIGSAWPY from GitHub', level=3)
         # init jigsaw-python submodule
-        subprocess.check_call(
-            ["git", "submodule", "update",
-             "--init", "submodules/jigsaw-python"])
+        tempdir = tempfile.TemporaryDirectory()
+        os.chdir(tempdir.name)
         # install jigsawpy
-        os.chdir(PARENT / 'submodules/jigsaw-python')
-        subprocess.check_call(["git", "checkout", "master"])
+        subprocess.check_call([
+            "git",
+            "clone",
+            "https://github.com/dengwirda/jigsaw-python"
+        ])
         self.announce('INSTALLING JIGSAWPY', level=3)
+        os.chdir('jigsaw-python')
         subprocess.check_call(["python", "setup.py", "install"])
         # install jigsaw
         self.announce(
@@ -68,8 +78,6 @@ class InstallJigsawCommand(distutils.cmd.Command):
         envlib = PYENV_PREFIX / 'lib' / SYSLIB[platform.system()]
         os.symlink(envlib, libsaw_prefix / envlib.name)
         os.chdir(PARENT)
-        subprocess.check_call(
-          ["git", "submodule", "deinit", "-f", "submodules/jigsaw-python"])
 
     def _check_gcc_version(self):
         cpp = shutil.which("c++")
@@ -117,6 +125,7 @@ setuptools.setup(
                       "geoalchemy2",
                       "utm",
                       "geopandas",
+                      'pyarrow',
                       ],
     entry_points={
         'console_scripts': [
