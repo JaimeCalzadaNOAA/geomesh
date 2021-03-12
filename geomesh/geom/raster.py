@@ -83,7 +83,8 @@ class RasterGeom(BaseGeom):
                 ax.contourf(x, y, new_mask, levels=[0, 1])
                 plt.close(fig)
                 polygon_collection.extend(
-                    [polygon for polygon in get_multipolygon_from_axes(ax)])
+                    [polygon for polygon
+                     in get_multipolygon_from_axes(ax).geoms])
         union_result = ops.unary_union(polygon_collection)
         if isinstance(union_result, Polygon):
             union_result = MultiPolygon([union_result])
@@ -103,7 +104,7 @@ class RasterGeom(BaseGeom):
         # TODO: Consider the ellipsoidal case. Refer to commit
         # dd087257c15692dd7d8c8e201d251ab5e66ff67f on main branch for
         # ellipsoidal ploting routing (removed).
-        for polygon in self.multipolygon:
+        for polygon in self.multipolygon.geoms:
             plt.plot(*polygon.exterior.xy, color='k')
             for interior in polygon.interiors:
                 plt.plot(*interior.xy, color='r')

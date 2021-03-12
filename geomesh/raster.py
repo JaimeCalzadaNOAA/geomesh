@@ -290,15 +290,13 @@ class Raster:
         values = self.get_values(band=band, masked=True, window=window)
         vmin = np.min(values) if vmin is None else float(vmin)
         vmax = np.max(values) if vmax is None else float(vmax)
-        cmap, norm, levels, col_val = figures.get_topobathy_kwargs(
-            values, vmin, vmax)
+        _kwargs = figures.get_topobathy_kwargs(values, vmin, vmax)
+        col_val = _kwargs.pop('col_val')
+        kwargs.update(**_kwargs)
         axes.contourf(
             self.get_x(window),
             self.get_y(window),
             values,
-            levels=levels,
-            cmap=cmap,
-            norm=norm,
             vmin=vmin,
             vmax=vmax,
             **kwargs
@@ -306,7 +304,7 @@ class Raster:
         axes.axis('scaled')
         if title is not None:
             axes.set_title(title)
-        mappable = ScalarMappable(cmap=cmap)
+        mappable = ScalarMappable(cmap=kwargs['cmap'])
         mappable.set_array([])
         mappable.set_clim(vmin, vmax)
         divider = make_axes_locatable(axes)

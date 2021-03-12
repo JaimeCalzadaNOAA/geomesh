@@ -10,6 +10,7 @@ import warnings
 
 from jigsawpy import jigsaw_msh_t, jigsaw_jig_t
 from jigsawpy import libsaw
+import matplotlib.pyplot as plt
 import numpy as np
 from pyproj import CRS, Transformer
 import rasterio
@@ -71,6 +72,13 @@ class FeatureCache:
             features = {}
 
 
+def constraint(f):
+    def decorator(self, *args, **kwargs):
+        del(self._msh_t)
+        f(self, *args, **kwargs)
+    return decorator
+
+
 class HfunRaster(BaseHfun, Raster):
 
     _raster = HfunInputRaster()
@@ -83,9 +91,14 @@ class HfunRaster(BaseHfun, Raster):
         self._hmax = float(hmax) if hmax is not None else hmax
         self._verbosity = int(verbosity)
 
+        if hmax is not None:
+            self.add_constant_value(self.hmax)
+
     def msh_t(self, window: rasterio.windows.Window = None,
               marche: bool = False, verbosity=None) -> jigsaw_msh_t:
 
+        if self.__dict__.get('output_mesh') is not None:
+            return self.__dict__['output_mesh']
 
         if window is None:
             iter_windows = list(self.iter_windows())
@@ -138,11 +151,11 @@ class HfunRaster(BaseHfun, Raster):
                 dim2 = window.height
 
                 tria3 = np.empty(
-                    ((dim1 - 1), (dim2  - 1)),
+                    ((dim1 - 1), (dim2 - 1)),
                     dtype=jigsaw_msh_t.TRIA3_t)
                 index = tria3["index"]
                 helper_ary = np.ones(
-                        ((dim1 - 1), (dim2  - 1)),
+                        ((dim1 - 1), (dim2 - 1)),
                         dtype=jigsaw_msh_t.INDEX_t).cumsum(1) - 1
                 index[:, :, 0] = np.arange(
                         0, dim1 - 1,
@@ -254,7 +267,6 @@ class HfunRaster(BaseHfun, Raster):
                 window_mesh.crs = utm_crs
                 utils.reproject(window_mesh, self.crs)
 
-
             # combine with results from previous windows
             output_mesh.tria3 = np.append(
                 output_mesh.tria3,
@@ -278,9 +290,10 @@ class HfunRaster(BaseHfun, Raster):
                 output_mesh.value = np.array(
                         [v for v in window_mesh.value],
                         dtype=jigsaw_msh_t.REALS_t)
-
+        self.__dict__['output_mesh'] = output_mesh
         return output_mesh
 
+    @constraint
     def add_patch(
             self,
             multipolygon: Union[MultiPolygon, Polygon],
@@ -302,7 +315,6 @@ class HfunRaster(BaseHfun, Raster):
         nprocs = cpu_count() if nprocs == -1 else nprocs
         _logger.debug(f'Using nprocs={nprocs}')
 
-
         # check target size
         target_size = self.hmin if target_size is None else target_size
         if target_size is None:
@@ -312,11 +324,11 @@ class HfunRaster(BaseHfun, Raster):
             raise ValueError("Argument target_size must be greater than zero.")
 
         # For expansion_rate
-        if expansion_rate != None:
-            exteriors = [ply.exterior for ply in multipolygon]
+        if expansion_rate is not None:
+            exteriors = [ply.exterior for ply in multipolygon.geoms]
             interiors = [
                 inter for ply in multipolygon for inter in ply.interiors]
-            
+
             features = MultiLineString([*exteriors, *interiors])
             self.add_feature(
                 feature=features,
@@ -348,7 +360,7 @@ class HfunRaster(BaseHfun, Raster):
                 else:
                     utm_crs = None
 
-                _logger.info(f'Transforming polygons ...')
+                _logger.info('Transforming polygons ...')
                 start = time()
                 with Pool(processes=nprocs) as pool:
                     transformed_polygons = MultiPolygon(pool.starmap(
@@ -358,7 +370,7 @@ class HfunRaster(BaseHfun, Raster):
                     ))
                 _logger.info(f'Transforming took {time()-start}.')
 
-                _logger.info(f'Creating mask from shape ...')
+                _logger.info('Creating mask from shape ...')
                 start = time()
                 try:
                     mask, _, _ = rasterio.mask.raster_geometry_mask(
@@ -372,7 +384,7 @@ class HfunRaster(BaseHfun, Raster):
                 except ValueError:
                     # If there's no overlap between the raster and
                     # shapes then it throws ValueError, instead of
-                    # checking for intersection, if there's a value 
+                    # checking for intersection, if there's a value
                     # error we assume there's no overlap
                     _logger.debug(
                         'Polygons don\'t intersect with the raster')
@@ -395,7 +407,7 @@ class HfunRaster(BaseHfun, Raster):
 
         self._tmpfile = tmpfile
 
-
+    @constraint
     def add_contour(
             self,
             level: Union[List[float], float],
@@ -417,8 +429,7 @@ class HfunRaster(BaseHfun, Raster):
             elif isinstance(_contours, LineString):
                 contours.append(_contours)
             elif isinstance(_contours, MultiLineString):
-                for _cont in _contours:
-                    contours.append(_cont)
+                contours.extend(_contours.geoms)
 
         if len(contours) == 0:
             _logger.info('No contours found!')
@@ -429,6 +440,7 @@ class HfunRaster(BaseHfun, Raster):
         _logger.info('Adding contours as features...')
         self.add_feature(contours, expansion_rate, target_size, nprocs)
 
+    @constraint
     def add_feature(
             self,
             feature: Union[LineString, MultiLineString],
@@ -468,7 +480,7 @@ class HfunRaster(BaseHfun, Raster):
             feature = [feature]
 
         elif isinstance(feature, MultiLineString):
-            feature = [linestring for linestring in feature]
+            feature = [linestring for linestring in feature.geoms]
 
         # check target size
         target_size = self.hmin if target_size is None else target_size
@@ -608,6 +620,7 @@ class HfunRaster(BaseHfun, Raster):
             return np.memmap(tmpfile, dtype='float32', mode='r',
                              shape=((window.width*window.height), 2))[:]
 
+    @constraint
     def add_subtidal_flow_limiter(
             self,
             hmin=None,
@@ -688,6 +701,7 @@ class HfunRaster(BaseHfun, Raster):
                 dst.write_band(1, hfun_values, window=window)
         self._tmpfile = tmpfile
 
+    @constraint
     def add_constant_value(self, value, lower_bound=None, upper_bound=None):
         lower_bound = -float('inf') if lower_bound is None \
             else float(lower_bound)
@@ -716,6 +730,12 @@ class HfunRaster(BaseHfun, Raster):
                 gc.collect()
         self._tmpfile = tmpfile
 
+    def tricontourf(self, **kwargs):
+        return utils.tricontourf(self.msh_t(), **kwargs)
+
+    def triplot(self, **kwargs):
+        return utils.triplot(self.msh_t(), **kwargs)
+
     @property
     def raster(self):
         return self._raster
@@ -740,6 +760,22 @@ class HfunRaster(BaseHfun, Raster):
     def verbosity(self, verbosity: int):
         self._verbosity = verbosity
 
+    @property
+    def _msh_t(self):
+        msh_t = self.__dict__.get('output_mesh')
+        if msh_t is None:
+            msh_t = self.msh_t()
+            self.__dict__['output_mesh'] = msh_t
+        return msh_t
+
+    @_msh_t.setter
+    def _msh_t(self, msh_t: jigsaw_msh_t):
+        self.__dict__['output_mesh'] = msh_t
+
+    @_msh_t.deleter
+    def _msh_t(self):
+        self.__dict__['output_mesh'] = None
+
 
 def transform_point(x, y, src_crs, utm_crs):
     transformer = Transformer.from_crs(src_crs, utm_crs, always_xy=True)
@@ -760,6 +796,7 @@ def transform_linestring(
         ])
     return linestring
 
+
 def transform_polygon(
     polygon: Polygon,
     src_crs: CRS = None,
@@ -768,7 +805,6 @@ def transform_polygon(
     if utm_crs is not None:
         transformer = Transformer.from_crs(
             src_crs, utm_crs, always_xy=True)
-
         polygon = ops.transform(
                 transformer.transform, polygon)
     return polygon

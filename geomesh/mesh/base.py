@@ -12,3 +12,4 @@ class BaseMesh:
             return self.msh_t.vert3['coord']
         else:
             raise ValueError(f'Unhandled mesh dimensions {self.msh_t.ndims}.')
+

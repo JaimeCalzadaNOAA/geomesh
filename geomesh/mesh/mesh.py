@@ -387,6 +387,9 @@ class EuclideanMesh2D(EuclideanMesh):
     def tricontourf(self, **kwargs):
         return utils.tricontourf(self.msh_t, **kwargs)
 
+    def triplot(self, **kwargs):
+        return utils.triplot(self.msh_t, **kwargs)
+
     def interpolate(self, raster: Union[Raster, List[Raster]],
                     method='nearest', nprocs=None):
 

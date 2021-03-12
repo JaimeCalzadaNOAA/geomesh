@@ -1,19 +1,20 @@
 from collections import defaultdict
-from enum import Enum
 from itertools import permutations
 from typing import Union, Dict
 
-from jigsawpy import jigsaw_msh_t  # type: ignore[import]
-from matplotlib.path import Path  # type: ignore[import]
-import matplotlib.pyplot as plt  # type: ignore[import]
-from matplotlib.tri import Triangulation  # type: ignore[import]
-import numpy as np  # type: ignore[import]
-from pyproj import CRS, Transformer  # type: ignore[import]
-from scipy.interpolate import (  # type: ignore[import]
+from jigsawpy import jigsaw_msh_t
+from matplotlib.cm import ScalarMappable
+from matplotlib.path import Path
+import matplotlib.pyplot as plt
+from matplotlib.tri import Triangulation
+from mpl_toolkits.axes_grid1 import make_axes_locatable
+import numpy as np
+from pyproj import CRS, Transformer
+from scipy.interpolate import (
     RectBivariateSpline, griddata)
-from shapely.geometry import Polygon, MultiPolygon  # type: ignore[import]
+from shapely.geometry import Polygon, MultiPolygon
 
-from geomesh.mesh.parsers import grd, sms2dm
+from geomesh.figures import get_topobathy_kwargs
 
 
 def mesh_to_tri(mesh):
@@ -70,7 +71,7 @@ def geom_to_multipolygon(mesh):
 
 
 def needs_sieve(mesh, area=None):
-    areas = [polygon.area for polygon in geom_to_multipolygon(mesh)]
+    areas = [polygon.area for polygon in geom_to_multipolygon(mesh).geoms]
     if area is None:
         remove = np.where(areas < np.max(areas))[0].tolist()
     else:
@@ -122,7 +123,7 @@ def sieve(mesh, area=None):
     """
     # select the nodes to remove based on multipolygon areas
     multipolygon = geom_to_multipolygon(mesh)
-    areas = [polygon.area for polygon in multipolygon]
+    areas = [polygon.area for polygon in multipolygon.geoms]
     if area is None:
         remove = np.where(areas < np.max(areas))[0].tolist()
     else:
@@ -134,7 +135,7 @@ def sieve(mesh, area=None):
     # if the path surrounds the node, these need to be removed.
     vert2_mask = np.full((mesh.vert2['coord'].shape[0],), False)
     for idx in remove:
-        path = Path(multipolygon[idx].exterior.coords, closed=True)
+        path = Path(multipolygon.geoms[idx].exterior.coords, closed=True)
         vert2_mask = vert2_mask | path.contains_points(mesh.vert2['coord'])
 
     # select any connected nodes; these ones are missed by
@@ -476,26 +477,58 @@ def interpolate_euclidean_grid_to_euclidean_mesh(
 
 
 def tricontourf(
-    mesh,
-    ax=None,
-    show=False,
-    figsize=None,
-    extend='both',
-    **kwargs
+        mesh,
+        axes=None,
+        show=False,
+        figsize=None,
+        extend='both',
+        vmin=None,
+        vmax=None,
+        **kwargs
 ):
-    if ax is None:
+    if axes is None:
         fig = plt.figure(figsize=figsize)
-        ax = fig.add_subplot(111)
-    ax.tricontourf(
+        axes = fig.add_subplot(111)
+    vmin = np.min(mesh.value) if vmin is None else float(vmin)
+    vmax = np.max(mesh.value) if vmax is None else float(vmax)
+    if kwargs.get('cmap') == 'topobathy':
+        kwargs.update(**get_topobathy_kwargs(mesh.value, vmin, vmax))
+        kwargs.pop('col_val')
+        # levels = kwargs.pop('levels')
+    axes.tricontourf(
         mesh.vert2['coord'][:, 0],
         mesh.vert2['coord'][:, 1],
         mesh.tria3['index'],
         mesh.value.flatten(),
-        **kwargs)
-    if show:
-        plt.gca().axis('scaled')
+        # levels=levels,
+        vmin=vmin,
+        vmax=vmax,
+        **kwargs
+    )
+    if show is True:
         plt.show()
-    return ax
+    # if extent is not None:
+    #     axes.axis(extent)
+    # if title is not None:
+    #     axes.set_title(title)
+    mappable = ScalarMappable(cmap=kwargs['cmap'])
+    mappable.set_array([])
+    mappable.set_clim(vmin, vmax)
+    divider = make_axes_locatable(axes)
+    cax = divider.append_axes("bottom", size="2%", pad=0.5)
+    cbar = plt.colorbar(
+        mappable,
+        cax=cax,
+        orientation='horizontal'
+    )
+    cbar.set_ticks([vmin, vmax])
+    cbar.set_ticklabels([np.around(vmin, 2), np.around(vmax, 2)])
+    # if cbar_label is not None:
+    #     cbar.set_label(cbar_label)
+    if show:
+        axes.axis('scaled')
+        plt.show()
+    return axes
 
 
 def triplot(
@@ -537,50 +570,6 @@ def reproject(
          in range(len(mesh.vert2['IDtag']))],
         dtype=jigsaw_msh_t.VERT2_t)
     mesh.crs = dst_crs
-
-
-def limgrad(mesh, dfdx, imax=100):
-    """
-    See https://github.com/dengwirda/mesh2d/blob/master/hjac-util/limgrad.m
-    for original source code.
-    """
-    tri = mesh_to_tri(mesh)
-    xy = np.vstack([tri.x, tri.y]).T
-    edge = tri.edges
-    dx = np.subtract(xy[edge[:, 0], 0], xy[edge[:, 1], 0])
-    dy = np.subtract(xy[edge[:, 0], 1], xy[edge[:, 1], 1])
-    elen = np.sqrt(dx**2+dy**2)
-    ffun = mesh.value.flatten()
-    aset = np.zeros(ffun.shape)
-    ftol = np.min(ffun) * np.sqrt(np.finfo(float).eps)
-    # precompute neighbor table
-    point_neighbors = defaultdict(set)
-    for simplex in tri.triangles:
-        for i, j in permutations(simplex, 2):
-            point_neighbors[i].add(j)
-    # iterative smoothing
-    for _iter in range(1, imax+1):
-        aidx = np.where(aset == _iter-1)[0]
-        if len(aidx) == 0.:
-            break
-        active_idxs = np.argsort(ffun[aidx])
-        for active_idx in active_idxs:
-            adjacent_edges = point_neighbors[active_idx]
-            for adj_edge in adjacent_edges:
-                if ffun[adj_edge] > ffun[active_idx]:
-                    fun1 = ffun[active_idx] + elen[active_idx] * dfdx
-                    if ffun[adj_edge] > fun1+ftol:
-                        ffun[adj_edge] = fun1
-                        aset[adj_edge] = _iter
-                else:
-                    fun2 = ffun[adj_edge] + elen[active_idx] * dfdx
-                    if ffun[active_idx] > fun2+ftol:
-                        ffun[active_idx] = fun2
-                        aset[active_idx] = _iter
-    if not _iter < imax:
-        msg = f'limgrad() did not converge within {imax} iterations.'
-        raise Exception(msg)
-    return ffun
 
 
 def msh_t_to_grd(msh: jigsaw_msh_t) -> Dict:
