@@ -1,13 +1,3 @@
-# CMake build cache for Jigsaw
-submodules/jigsaw-python/external/jigsaw/build
-
-# temporary old version of jigsaw
-submodules/jigsaw-geo-python
-
-# files generated or used by examples
-examples
-
-
 # Created by https://www.gitignore.io/api/python
 # Edit at https://www.gitignore.io/?templates=python
 

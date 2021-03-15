@@ -593,7 +593,7 @@ def grd_to_msh_t(_grd: Dict) -> jigsaw_msh_t:
                          dtype=jigsaw_msh_t.TRIA3_t)
     msh.quad4 = np.array([(index, 0) for index in quads],
                          dtype=jigsaw_msh_t.QUAD4_t)
-    value = [value for _, value in _grd['nodes'].values()]
+    value = [-value for _, value in _grd['nodes'].values()]
     msh.value = np.array(np.array(value).reshape((len(value), 1)),
                          dtype=jigsaw_msh_t.REALS_t)
     crs = _grd.get('crs')
@@ -613,7 +613,7 @@ def msh_t_to_2dm(msh: jigsaw_msh_t):
             coords = np.vstack(
                 transformer.transform(coords[:, 0], coords[:, 1])).T
     return {
-            'ND': {i+1: (coord, msh.value[i, 0] if not
+            'ND': {i+1: (coord, -msh.value[i, 0] if not
                          np.isnan(msh.value[i, 0]) else -99999)
                    for i, coord in enumerate(coords)},
             'E3T': {i+1: index+1 for i, index
